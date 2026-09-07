@@ -1,4 +1,4 @@
-import { ArrowRight, Bookmark, Gauge, MapPin, Route as RouteIcon, TimerReset } from 'lucide-react';
+import { ArrowRight, Bookmark, MapPin, Route as RouteIcon, TimerReset } from 'lucide-react';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSavedTrains } from '../../hooks/useSavedTrains';
@@ -7,16 +7,11 @@ import { useAppDispatch, useAppSelector } from '../../hooks/reduxHooks';
 import { hydrateTrainSummary } from '../../features/trains/trainSlice';
 import {
   formatTimeOnly,
-  getDelayMinutes,
   getDistanceCovered,
-  getLiveSequence,
-  getLiveSpeed,
   getMergedRouteStops,
   getNextMainStation,
   getNextMainStationDelay,
   getStationEtaPredictions,
-  getTrainDelayInfo,
-  isMainHalt,
   normalizeLive,
 } from '../../utils/train';
 
@@ -57,7 +52,6 @@ export default function TrainCard({ train, variant = 'live' }) {
   const live = normalizeLive(bundle.live || {});
   const p = phase(live);
   const running = p === 'running';
-  const sequence = running ? getLiveSequence(trainBundle) : 0;
   const currentCode = live.currentStationCode || '';
   const current = stops.find((s) => String(s.stationCode || s.code).toUpperCase() === String(currentCode).toUpperCase());
   const main = getNextMainStation(trainBundle);
@@ -68,7 +62,6 @@ export default function TrainCard({ train, variant = 'live' }) {
   const nextEtaTone = etaPred?.arrivalTone || 'unknown';
 
   const delayInfo = nextMainDelay;
-  const speed = getLiveSpeed(trainBundle);
   const covered = getDistanceCovered(trainBundle);
   const total = Number(data.distanceKm ?? stops.at(-1)?.distanceKm ?? 1);
   const progressPercent = total > 0 && covered != null
@@ -94,23 +87,23 @@ export default function TrainCard({ train, variant = 'live' }) {
     return (
       <article
         onClick={open}
-        className="group cursor-pointer overflow-hidden rounded-2xl border border-[#dce7e4] bg-white px-4 py-3.5 transition hover:-translate-y-0.5 hover:border-[#b6d6ce] hover:shadow-[0_12px_24px_rgba(20,55,56,.07)]"
+        className="train-summary-card group cursor-pointer overflow-hidden rounded-xl border border-[#dce7e4] bg-white px-3.5 py-2.5 transition hover:-translate-y-0.5 hover:border-[#b6d6ce] hover:shadow-[0_8px_18px_rgba(20,55,56,.05)]"
       >
-        <div className="flex items-center gap-3.5">
-          <div className="grid h-10 min-w-11 place-items-center rounded-xl bg-[#edf5f3] font-mono-ui text-[12px] font-bold text-[#0c716a]">
+        <div className="flex w-full min-w-0 items-center gap-3">
+          <div className="grid h-9 w-11 shrink-0 place-items-center rounded-lg bg-[#edf5f3] font-mono-ui text-[11.5px] font-bold text-[#0c716a]">
             {train.number}
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-[13px] font-semibold text-[#183c40]">
+            <h3 className="truncate text-[12.5px] font-semibold text-[#183c40]">
               {trainName}
             </h3>
-            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#657e80]">
-              <span className="font-medium text-[#2f5558]">{sourceName || 'Origin'}</span>
-              <ArrowRight size={12} className="text-[#99abab]" />
-              <span className="font-medium text-[#2f5558]">{destName || 'Destination'}</span>
+            <p className="mt-0.5 flex items-center gap-1 text-[10.5px] text-[#657e80]">
+              <span className="truncate font-medium text-[#2f5558]">{source}</span>
+              <ArrowRight size={11} className="shrink-0 text-[#99abab]" />
+              <span className="truncate font-medium text-[#2f5558]">{dest}</span>
             </p>
           </div>
-          <ArrowRight size={15} className="text-[#a4b5b5] transition-transform group-hover:translate-x-1 group-hover:text-[#0c716a]" />
+          <ArrowRight size={14} className="shrink-0 text-[#a4b5b5] transition-transform group-hover:translate-x-1 group-hover:text-[#0c716a]" />
         </div>
       </article>
     );
@@ -143,8 +136,8 @@ export default function TrainCard({ train, variant = 'live' }) {
         {!summary && (
           <div className="train-card-next-eta">
             <span>Next ETA</span>
-            <strong className={!nextEta ? 'is-muted' : nextEtaTone === 'late' ? 'is-late' : 'is-good'}>
-              {nextEta ? formatTimeOnly(nextEta, timeFormat) : '—'}
+            <strong className={!running || !nextEta ? 'is-muted' : nextEtaTone === 'late' ? 'is-late' : 'is-good'}>
+              {running && nextEta ? formatTimeOnly(nextEta, timeFormat) : '...'}
             </strong>
             <small>{main?.stationName || 'Next station'}</small>
           </div>
@@ -174,26 +167,21 @@ export default function TrainCard({ train, variant = 'live' }) {
               <div className="text-[9px] font-semibold uppercase tracking-[.12em] text-[#7d918f]">
                 <TimerReset size={11} className="mr-1 inline" />Next station ETA
               </div>
-              <div className={`mt-1 font-mono-ui text-[25px] font-bold leading-none ${!nextEta ? 'text-[#899998]' : nextEtaTone === 'late' ? 'text-[#d94e4e]' : 'text-[#0a8b68]'}`}>
-                {nextEta ? formatTimeOnly(nextEta, timeFormat) : '—'}
+              <div className={`mt-1 font-mono-ui text-[25px] font-bold leading-none ${!running || !nextEta ? 'text-[#899998]' : nextEtaTone === 'late' ? 'text-[#d94e4e]' : 'text-[#0a8b68]'}`}>
+                {running && nextEta ? formatTimeOnly(nextEta, timeFormat) : '...'}
               </div>
               <div className="mt-1 text-[9px] text-[#728688]">{main?.stationName || 'Awaiting next main station'}</div>
             </div>
             <div className="flex flex-col items-end gap-1.5 text-right">
               <span
-                className={`train-card-current-delay ${delayInfo.tone === 'late' ? 'late' : delayInfo.tone === 'early' ? 'early' : 'on-time'}`}
-                title={delayInfo.stationName ? `Delay at next main station: ${delayInfo.stationName}` : undefined}
+                className={`train-card-current-delay ${running && delayInfo.tone === 'late' ? 'late' : running && delayInfo.tone === 'early' ? 'early' : running ? 'on-time' : 'unknown'}`}
+                title={running && delayInfo.stationName ? `Delay at next main station: ${delayInfo.stationName}` : undefined}
               >
-                {delayInfo.label}
+                {running ? delayInfo.label : '...'}
               </span>
-              {delayInfo.stationName && (
+              {running && delayInfo.stationName && (
                 <span className="text-[8.5px] text-[#718687] font-medium leading-none">
                   At {delayInfo.stationName}
-                </span>
-              )}
-              {speed != null && (
-                <span className="inline-flex items-center gap-1 text-[9px] font-medium text-[#718687]">
-                  <Gauge size={11} /> {Math.round(Number(speed))} km/h
                 </span>
               )}
               {covered != null && (

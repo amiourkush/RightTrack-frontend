@@ -6,7 +6,7 @@ import TrainCard from '../components/trains/TrainCard';
 import EmptyState from '../components/common/EmptyState';
 import { canSearchTrainQuery, getLocalISODate } from '../utils/train';
 import { useAppDispatch, useAppSelector } from '../hooks/reduxHooks';
-import { fetchTrainsBetween, hydrateTrainSummary, pollTrainLive, searchTrains, setSearchQuery } from '../features/trains/trainSlice';
+import { fetchTrainsBetween, hydrateTrainSummary, searchTrains, setSearchQuery } from '../features/trains/trainSlice';
 import { selectSearch, selectSearchError, selectSearchLoading } from '../features/trains/trainSelectors';
 
 const filters = ['All', 'Express', 'Superfast', 'Mail/Express', 'Passenger'];
@@ -43,26 +43,6 @@ export default function FindTrain() {
         dispatch(hydrateTrainSummary({ trainNumber: train.number, journeyDate }));
       });
     }
-  }, [dispatch, results, journeyDate]);
-
-  useEffect(() => {
-    if (!results.length) return;
-    const pollCards = () => {
-      if (document.visibilityState === 'visible' && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
-        results.slice(0, 6).forEach((train) => {
-          dispatch(pollTrainLive({ trainNumber: train.number, journeyDate }));
-        });
-      }
-    };
-
-    const timer = setInterval(pollCards, 60000);
-    const handleOnline = () => pollCards();
-    window.addEventListener('online', handleOnline);
-
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener('online', handleOnline);
-    };
   }, [dispatch, results, journeyDate]);
 
   const visible = useMemo(() => results.filter((train) => filter === 'All' || String(train.type || '').toLowerCase().includes(filter.toLowerCase())), [results, filter]);

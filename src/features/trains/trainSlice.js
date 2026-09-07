@@ -1,19 +1,35 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import {
-  getPreferredLiveStatus, getTrainDetails, getTrainEta,
-  getTrainRoute, getStationEta, getTrainsBetween, refreshTrain,
-  searchTrainsGet, searchTrainsPost,
+  getRailRadarHistoricalRun,
+  getRailRadarLive,
+  getTrainDetails,
+  getTrainRoute,
+  getTrainsBetween,
+  predictLiveEta,
+  refreshTrain,
+  searchTrainsGet,
+  searchTrainsPost,
 } from '../../services/api/trainApi';
-import { normalizeEta, normalizeLive, normalizeSearchResult } from '../../utils/train';
+import {
+  addMinutesToTime,
+  calculateFutureStationPredictions,
+  getMergedRouteStops,
+  normalizeLive,
+  normalizeSearchResult,
+  stationCode,
+} from '../../utils/train';
 import {
   bustLiveCache,
+  getCachedHistory,
   getCachedLive,
   getCachedSearch,
   getCachedStatic,
-  isLiveFresh,
+  setCachedHistory,
   setCachedLive,
+  setCachedPrediction,
   setCachedSearch,
   setCachedStatic,
+  todayISO,
 } from '../../utils/trainCache';
 
 const initialState = {
@@ -42,7 +58,6 @@ function extractSearchItems(payload) {
 // Search Trains  (Cache: 24h)
 // ─────────────────────────────────────────────────────────
 export const searchTrains = createAsyncThunk('trains/search', async (query, { rejectWithValue }) => {
-  // Return cached results immediately if still valid
   const cached = getCachedSearch(query);
   if (cached) return { query, results: cached, fromCache: true };
 
@@ -64,244 +79,280 @@ export const searchTrains = createAsyncThunk('trains/search', async (query, { re
 });
 
 // ─────────────────────────────────────────────────────────
-// Fetch Train Bundle – static (24h) + live (2min)
+// Fetch Train Bundle – static details & route (24h cache) + live poll
 // ─────────────────────────────────────────────────────────
-export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ trainNumber, journeyDate }, { rejectWithValue }) => {
+export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ trainNumber, journeyDate }) => {
   const key = String(trainNumber);
 
-  // 1. Serve static data (details + route) from cache if available
-  const cachedStatic = getCachedStatic(key);
-  if (cachedStatic?.details && cachedStatic?.route) {
-    // Static data is fresh in cache – only fetch live status & ETA
-    const liveFresh = isLiveFresh(key, journeyDate);
-    const [liveRes, etaRes] = await Promise.allSettled([
-      liveFresh ? Promise.resolve({ data: getCachedLive(key, journeyDate)?.live || getCachedLive(key, journeyDate) }) : getPreferredLiveStatus(trainNumber, journeyDate),
-      getTrainEta(trainNumber, journeyDate),
+  // 1. Serve static timetable and details from cache (24h static tier)
+  let cachedStatic = getCachedStatic(key);
+  let details = cachedStatic?.details || null;
+  let route = cachedStatic?.route || null;
+
+  if (!details || !route) {
+    const results = await Promise.allSettled([
+      getTrainDetails(trainNumber),
+      getTrainRoute(trainNumber),
     ]);
 
-    const liveRaw = liveRes.status === 'fulfilled' ? liveRes.value?.data : null;
-    const etaRaw  = etaRes.status === 'fulfilled' ? etaRes.value?.data : null;
+    const detailsRaw = results[0].status === 'fulfilled' ? results[0].value.data : null;
+    const routeRaw   = results[1].status === 'fulfilled' ? results[1].value.data : null;
+    details = rootData(detailsRaw);
+    route   = rootData(routeRaw);
 
-    const live = liveRaw ? normalizeLive(liveRaw) : null;
-    const activeDate = live?.journeyDate || journeyDate;
-    const eta  = etaRaw  ? normalizeEta(etaRaw)   : null;
+    if (details || route) {
+      setCachedStatic(key, { details, route });
+    }
+  }
 
-    const stationEtasMap = {};
-    if (Array.isArray(eta?.stationEtas)) {
-      eta.stationEtas.forEach((s) => {
-        const code = String(s?.stationCode || s?.code || '').toUpperCase();
-        if (code) stationEtasMap[code] = s;
-      });
+  return {
+    trainNumber: key,
+    journeyDate,
+    ...(details ? { details } : {}),
+    ...(route ? { route } : {}),
+  };
+});
+
+// ─────────────────────────────────────────────────────────
+// Hydrate Train Summary (FindTrain cards) – static (24h) + cached live (2min)
+// ─────────────────────────────────────────────────────────
+export const hydrateTrainSummary = createAsyncThunk('trains/hydrateSummary', async ({ trainNumber, journeyDate }, { dispatch, rejectWithValue }) => {
+  try {
+    const key = String(trainNumber);
+    let cachedStatic = getCachedStatic(key);
+    let details = cachedStatic?.details || null;
+    let route = cachedStatic?.route || null;
+
+    if (!details || !route) {
+      const results = await Promise.allSettled([
+        getTrainDetails(trainNumber),
+        getTrainRoute(trainNumber),
+      ]);
+      details = rootData(results[0].status === 'fulfilled' ? results[0].value.data : null);
+      route = rootData(results[1].status === 'fulfilled' ? results[1].value.data : null);
+      if (details || route) setCachedStatic(key, { details, route });
     }
 
-    // Persist fresh live data to date-scoped live cache
-    if (live) {
-      setCachedLive(key, activeDate, {
-        live,
-        ...(eta ? { eta } : {}),
-        ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
-        journeyDate: activeDate,
-        liveLastUpdated: Date.now(),
-      });
+    // Hydrate cached live data if fresh
+    const cachedLive = getCachedLive(key, journeyDate);
+    if (cachedLive) {
+      dispatch(mergeLiveTelemetry({
+        trainNumber: key,
+        live: cachedLive.live,
+        mlEta: cachedLive.mlEta,
+        stationEtas: cachedLive.stationEtas,
+        journeyDate: cachedLive.journeyDate,
+        lastUpdated: cachedLive.liveLastUpdated || Date.now(),
+      }));
     }
 
     return {
       trainNumber: key,
-      journeyDate: activeDate,
-      details: cachedStatic.details,
-      route:   cachedStatic.route,
-      ...(live ? { live } : {}),
-      ...(eta  ? { eta }  : {}),
-      ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
-    };
-  }
-
-  // 2. Full network fetch (first ever load for this train when static cache is missing)
-  const results = await Promise.allSettled([
-    getTrainDetails(trainNumber),
-    getTrainRoute(trainNumber),
-    getPreferredLiveStatus(trainNumber, journeyDate),
-    getTrainEta(trainNumber, journeyDate),
-  ]);
-
-  const detailsRaw = results[0].status === 'fulfilled' ? results[0].value.data : null;
-  const routeRaw   = results[1].status === 'fulfilled' ? results[1].value.data : null;
-  const liveRaw    = results[2].status === 'fulfilled' ? results[2].value.data : null;
-  const etaRaw     = results[3].status === 'fulfilled' ? results[3].value.data : null;
-
-  const details = rootData(detailsRaw);
-  const route   = rootData(routeRaw);
-
-  if (!details && !route) return rejectWithValue('No train data is available.');
-
-  const live = liveRaw ? normalizeLive(liveRaw) : null;
-  const activeDate = live?.journeyDate || journeyDate;
-  const eta  = etaRaw  ? normalizeEta(etaRaw)   : null;
-
-  const stationEtasMap = {};
-  if (Array.isArray(eta?.stationEtas)) {
-    eta.stationEtas.forEach((s) => {
-      const code = String(s?.stationCode || s?.code || '').toUpperCase();
-      if (code) stationEtasMap[code] = s;
-    });
-  }
-
-  const bundle = {
-    trainNumber: key,
-    journeyDate: activeDate,
-    details,
-    route,
-    ...(live ? { live } : {}),
-    ...(eta  ? { eta }  : {}),
-    ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
-  };
-
-  // Cache static tier (24h) and live tier (2min, date-scoped) separately
-  setCachedStatic(key, bundle);
-  if (live) {
-    setCachedLive(key, activeDate, {
-      live,
-      ...(eta ? { eta } : {}),
-      ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
-      journeyDate: activeDate,
-      liveLastUpdated: Date.now(),
-    });
-  }
-
-  return bundle;
-});
-
-// ─────────────────────────────────────────────────────────
-// Hydrate Train Summary (FindTrain cards)  – static (24h) + live (2min)
-// ─────────────────────────────────────────────────────────
-export const hydrateTrainSummary = createAsyncThunk('trains/hydrateSummary', async ({ trainNumber, journeyDate }, { rejectWithValue }) => {
-  try {
-    const key = String(trainNumber);
-    const cachedStatic = getCachedStatic(key);
-    const cachedLive   = getCachedLive(key, journeyDate);
-    const hasStatic    = cachedStatic?.details && cachedStatic?.route;
-    const hasLive      = isLiveFresh(key, journeyDate);
-
-    const promises = await Promise.allSettled([
-      hasStatic ? Promise.resolve({ data: cachedStatic.details }) : getTrainDetails(trainNumber),
-      hasStatic ? Promise.resolve({ data: cachedStatic.route })   : getTrainRoute(trainNumber),
-      hasLive   ? Promise.resolve({ data: cachedLive?.live || cachedLive }) : getPreferredLiveStatus(trainNumber, journeyDate),
-      getTrainEta(trainNumber, journeyDate),
-    ]);
-
-    const detailsRaw = promises[0].status === 'fulfilled' ? promises[0].value.data : null;
-    const routeRaw   = promises[1].status === 'fulfilled' ? promises[1].value.data : null;
-    const liveRaw    = promises[2].status === 'fulfilled' ? promises[2].value.data : null;
-    const etaRaw     = promises[3].status === 'fulfilled' ? promises[3].value.data : null;
-
-    const details = rootData(detailsRaw);
-    const route   = rootData(routeRaw);
-    const live = liveRaw ? normalizeLive(liveRaw) : null;
-    const activeDate = live?.journeyDate || journeyDate;
-    const eta  = etaRaw  ? normalizeEta(etaRaw)   : null;
-
-    const stationEtasMap = {};
-    if (Array.isArray(eta?.stationEtas)) {
-      eta.stationEtas.forEach((s) => {
-        const code = String(s?.stationCode || s?.code || '').toUpperCase();
-        if (code) stationEtasMap[code] = s;
-      });
-    }
-
-    const bundle = {
-      trainNumber: key,
-      journeyDate: activeDate,
+      journeyDate,
       ...(details ? { details } : {}),
-      ...(route   ? { route }   : {}),
-      ...(live    ? { live }    : {}),
-      ...(eta     ? { eta }     : {}),
-      ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
+      ...(route ? { route } : {}),
+      ...(cachedLive?.live ? { live: cachedLive.live } : {}),
+      ...(cachedLive?.mlEta ? { mlEta: cachedLive.mlEta } : {}),
+      ...(cachedLive?.stationEtas ? { stationEtas: cachedLive.stationEtas } : {}),
     };
-
-    if (details || route) setCachedStatic(key, bundle);
-    if (live) {
-      setCachedLive(key, activeDate, {
-        live,
-        ...(eta ? { eta } : {}),
-        ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
-        journeyDate: activeDate,
-        liveLastUpdated: Date.now(),
-      });
-    }
-
-    return bundle;
   } catch (error) {
-    return rejectWithValue(error?.response?.data?.message || error?.message || 'Summary unavailable');
+    return rejectWithValue(error?.message || 'Summary unavailable');
   }
 });
 
 // ─────────────────────────────────────────────────────────
-// Poll Train Live – strictly live telemetry (preferred live + ETA) in parallel
+// Poll Train Live – Strictly governed request architecture
+//
+// PHASE A (First Acquisition when history is not cached):
+//   1 Current RailRadar GET + 4 Historical RailRadar GETs (in parallel)
+//   = 5 RailRadar requests maximum
+//   Then: 1 ML /predict if running
+//
+// PHASE B (Normal 60-second Polling when history is cached):
+//   Request 1: Current RailRadar GET
+//   Request 2: ML /predict (POST) if status === "running"
+//   Total: EXACTLY 2 requests (1 RailRadar + 1 ML)
 // ─────────────────────────────────────────────────────────
-export const pollTrainLive = createAsyncThunk('trains/pollLive', async ({ trainNumber, journeyDate }, { dispatch, rejectWithValue }) => {
+export const pollTrainLive = createAsyncThunk('trains/pollLive', async ({ trainNumber, journeyDate }, { dispatch, getState, rejectWithValue }) => {
   const key = String(trainNumber);
 
-  // Poll only live telemetry: preferred live status (RailRadar with backend fallback) and ETA in parallel
-  const [liveRes, etaRes] = await Promise.allSettled([
-    getPreferredLiveStatus(trainNumber, journeyDate),
-    getTrainEta(trainNumber, journeyDate),
-  ]);
-
-  const liveRaw = liveRes.status === 'fulfilled' && liveRes.value?.data
-    ? liveRes.value.data
-    : null;
-
-  if (!liveRaw && etaRes.status !== 'fulfilled') {
-    const err = liveRes.status === 'rejected' ? liveRes.reason : null;
-    return rejectWithValue(err?.response?.data?.message || err?.message || 'Live status unavailable');
+  // REQUEST 1: Current RailRadar /live
+  let liveRaw;
+  try {
+    const liveRes = await getRailRadarLive(key);
+    liveRaw = liveRes?.data?.data || liveRes?.data;
+  } catch {
+    return rejectWithValue('Current RailRadar live status unavailable');
   }
 
-  const liveData = liveRaw ? normalizeLive(liveRaw) : null;
-  const activeDate = liveData?.journeyDate || journeyDate;
-  const etaPayload = etaRes.status === 'fulfilled' ? normalizeEta(etaRes.value?.data) : null;
+  if (!liveRaw || (!liveRaw.status && !liveRaw.currentLocation && !liveRaw.trainNumber)) {
+    return rejectWithValue('Invalid RailRadar response');
+  }
 
-  const stationEtasMap = {};
-  if (Array.isArray(etaPayload?.stationEtas)) {
-    etaPayload.stationEtas.forEach((s) => {
-      const code = String(s?.stationCode || s?.code || '').toUpperCase();
-      if (code) stationEtasMap[code] = s;
+  // ONE RailRadar response provides BOTH live location AND current delay
+  const liveData = normalizeLive(liveRaw);
+  const activeDate = (liveRaw.startDate || '').substring(0, 10) || journeyDate || liveData.journeyDate || todayISO();
+  liveData.journeyDate = activeDate;
+  if (Array.isArray(liveRaw.route)) {
+    liveData.route = liveRaw.route;
+  }
+
+  const status = String(liveRaw.status || liveData.status || '').toLowerCase().trim();
+
+  // Rule 4: If train is NOT running:
+  // DO NOT call /predict.
+  // DO NOT perform future station ETA distribution.
+  // DO NOT fetch historical runs.
+  // Predictions UI displays "..."
+  if (status !== 'running') {
+    const nonRunningTelemetry = {
+      trainNumber: key,
+      live: liveData,
+      mlEta: null,
+      stationEtas: {},
+      journeyDate: activeDate,
+      lastUpdated: Date.now(),
+    };
+    dispatch(mergeLiveTelemetry(nonRunningTelemetry));
+    setCachedLive(key, activeDate, {
+      trainNumber: key,
+      journeyDate: activeDate,
+      live: liveData,
+      mlEta: null,
+      stationEtas: {},
+      liveLastUpdated: Date.now(),
     });
+    return { trainNumber: key, journeyDate: activeDate, lastUpdated: Date.now() };
   }
+
+  // TRAIN IS RUNNING: Proceed to ML prediction workflow
+  // Step A: Check 4-day history cache
+  let historicalRuns = getCachedHistory(key, activeDate);
+  if (!historicalRuns || !Array.isArray(historicalRuns)) {
+    // FIRST ACQUISITION: 4 historical days in parallel
+    const anchor = new Date(activeDate);
+    const histFetches = [1, 2, 3, 4].map(async (daysBack) => {
+      const d = new Date(anchor);
+      d.setDate(d.getDate() - daysBack);
+      const dateStr = d.toISOString().substring(0, 10);
+      try {
+        const r = await getRailRadarHistoricalRun(key, dateStr);
+        const json = r.data || {};
+        const hd = json.data || json;
+        if (hd.status === 'completed' && typeof hd.delayMinutes === 'number') {
+          return { date: dateStr, final_delay_minutes: hd.delayMinutes };
+        }
+      } catch {
+        // Silently skip missing historical run
+      }
+      return null;
+    });
+
+    const results = await Promise.all(histFetches);
+    historicalRuns = results.filter(Boolean);
+    setCachedHistory(key, activeDate, historicalRuns);
+  }
+
+  // Step B: Build payload for REQUEST 2 (ML /predict)
+  const currentTrainState = getState().trains.byNumber[key] || {};
+  const routeStops = getMergedRouteStops({
+    ...currentTrainState,
+    live: liveData,
+    route: currentTrainState.route || liveRaw.route,
+  });
+
+  const cl = liveRaw.currentLocation || liveData.currentLocation || {};
+  const nh = liveRaw.nextHalt || liveData.nextHalt || {};
+
+  // Destination = last stop with isHalt !== false
+  const destStop = [...routeStops].reverse().find((s) => s.isHalt !== false) || routeStops.at(-1);
+
+  // Current stop schedule
+  const curStop = routeStops.find((s) =>
+    (cl.sequence != null && Number(s.sequence) === Number(cl.sequence)) ||
+    (cl.stationCode && stationCode(s).toUpperCase() === String(cl.stationCode).toUpperCase())
+  ) || {};
+
+  const currentDelay = typeof liveRaw.delayMinutes === 'number'
+    ? liveRaw.delayMinutes
+    : Number(liveData.delayMinutes || 0);
+
+  const payload = {
+    train_number: key,
+    train_name: liveRaw.trainName || currentTrainState.details?.trainName || '',
+    journey_date: activeDate,
+    status: liveRaw.status || 'running',
+    current_delay_minutes: currentDelay,
+    distance_km: Number(liveRaw.train?.distance || liveRaw.distanceKm || currentTrainState.details?.distanceKm || destStop?.distanceKm || 0),
+    last_updated_at: liveRaw.lastUpdatedAt || liveData.lastUpdatedAt || new Date().toISOString(),
+    destination: {
+      station_code: destStop?.stationCode || destStop?.code || '',
+      station_name: destStop?.stationName || destStop?.name || '',
+      scheduled_arrival: destStop?.scheduledArrivalTime || destStop?.scheduledArrival || '',
+    },
+    current_location: {
+      station_code: cl.stationCode || '',
+      station_name: cl.stationName || '',
+      sequence: Number(cl.sequence || 0),
+      location_status: cl.status || '',
+      scheduled_departure: curStop?.scheduledDepartureTime || curStop?.scheduledDeparture || null,
+      scheduled_arrival: curStop?.scheduledArrivalTime || curStop?.scheduledArrival || null,
+    },
+    next_halt: {
+      station_code: nh.stationCode || '',
+      station_name: nh.stationName || '',
+      scheduled_arrival: nh.scheduledArrival || null,
+      estimated_arrival: nh.estimatedArrival || null,
+    },
+    historical_runs: (historicalRuns || []).map((r) => ({
+      date: r.date || r.journey_date,
+      final_delay_minutes: Number(r.final_delay_minutes),
+    })),
+  };
+
+  // REQUEST 2: ML /predict
+  let mlEta;
+  try {
+    const mlRes = await predictLiveEta(payload);
+    mlEta = mlRes?.data?.data || mlRes?.data;
+  } catch {
+    mlEta = {
+      predicted_destination_eta: destStop?.scheduledArrivalTime
+        ? addMinutesToTime(destStop.scheduledArrivalTime, currentDelay)
+        : null,
+      predicted_final_delay_minutes: currentDelay,
+      current_live_delay_minutes: currentDelay,
+    };
+  }
+
+  // Future Station ETA Distribution (Distance-based formula)
+  const stationEtas = calculateFutureStationPredictions(
+    { ...currentTrainState, live: liveData, route: currentTrainState.route || liveRaw.route },
+    mlEta
+  );
 
   const telemetry = {
     trainNumber: key,
-    ...(liveData ? { live: liveData } : {}),
-    ...(etaPayload ? { eta: etaPayload } : {}),
-    ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
+    live: liveData,
+    mlEta,
+    stationEtas,
     journeyDate: activeDate,
     lastUpdated: Date.now(),
   };
 
   dispatch(mergeLiveTelemetry(telemetry));
 
-  // Persist fresh live data to date-scoped 2min cache for fast re-open
-  if (liveData) {
-    setCachedLive(key, activeDate, {
-      live: liveData,
-      ...(etaPayload ? { eta: etaPayload } : {}),
-      ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
-      journeyDate: activeDate,
-      liveLastUpdated: Date.now(),
-    });
-  }
+  // Persist to 2-minute live cache and prediction cache
+  setCachedLive(key, activeDate, {
+    live: liveData,
+    mlEta,
+    stationEtas,
+    journeyDate: activeDate,
+    liveLastUpdated: Date.now(),
+  });
+  setCachedPrediction(key, activeDate, mlEta);
 
   return { trainNumber: key, journeyDate: activeDate, lastUpdated: Date.now() };
-});
-
-// ─────────────────────────────────────────────────────────
-// Remaining thunks – unchanged
-// ─────────────────────────────────────────────────────────
-export const fetchStationEta = createAsyncThunk('trains/fetchStationEta', async ({ trainNumber, stationCode }, { rejectWithValue }) => {
-  try {
-    return { trainNumber, stationCode, data: normalizeEta((await getStationEta(trainNumber, stationCode)).data) };
-  } catch (error) {
-    return rejectWithValue(error?.response?.data?.message || error?.message);
-  }
 });
 
 export const fetchTrainsBetween = createAsyncThunk('trains/between', async (payload, { rejectWithValue }) => {
@@ -310,7 +361,7 @@ export const fetchTrainsBetween = createAsyncThunk('trains/between', async (payl
 });
 
 export const requestTrainRefresh = createAsyncThunk('trains/refresh', async ({ trainNumber, journeyDate }, { rejectWithValue }) => {
-  bustLiveCache(trainNumber); // Immediately invalidate 2min live cache on manual refresh
+  bustLiveCache(trainNumber, journeyDate);
   try { return (await refreshTrain(trainNumber, journeyDate)).data; }
   catch (error) { return rejectWithValue(error?.response?.data?.message || error?.message); }
 });
@@ -322,23 +373,39 @@ const slice = createSlice({
   name: 'trains', initialState,
   reducers: {
     setSearchQuery(state, action) { state.searchQuery = action.payload; },
-    selectTrain(state, action) { state.selectedTrainNumber = String(action.payload); },
+    selectTrain(state, action) {
+      const newTrain = action.payload ? String(action.payload) : null;
+      if (state.selectedTrainNumber && state.selectedTrainNumber !== newTrain) {
+        // Reset previous train's live state to prevent cross-train leakage
+        const prevKey = state.selectedTrainNumber;
+        if (state.byNumber[prevKey]) {
+          state.byNumber[prevKey] = {
+            details: state.byNumber[prevKey].details,
+            route: state.byNumber[prevKey].route,
+            search: state.byNumber[prevKey].search,
+          };
+        }
+      }
+      state.selectedTrainNumber = newTrain;
+    },
     clearSelectedTrain(state) { state.selectedTrainNumber = null; },
     mergeLiveTelemetry(state, action) {
       const key = String(action.payload.trainNumber);
       const current = state.byNumber[key] || {};
+      const newJourneyDate = action.payload.journeyDate;
+      const isDifferentDate = Boolean(newJourneyDate && current.journeyDate && newJourneyDate !== current.journeyDate);
+
       state.byNumber[key] = {
         ...current,
-        ...(action.payload.live        ? { live: action.payload.live }               : {}),
-        ...(action.payload.eta         ? { eta: action.payload.eta }                 : {}),
-        ...(action.payload.location    ? { location: action.payload.location }       : {}),
-        ...(action.payload.mlEta       ? { mlEta: action.payload.mlEta }             : {}),
-        ...(action.payload.stationEtas ? { stationEtas: { ...(current.stationEtas || {}), ...action.payload.stationEtas } } : {}),
-        ...(action.payload.journeyDate ? { journeyDate: action.payload.journeyDate } : {}),
+        ...(action.payload.live        ? { live: action.payload.live }               : (isDifferentDate ? { live: null } : {})),
+        ...(action.payload.eta         ? { eta: action.payload.eta }                 : (isDifferentDate ? { eta: null } : {})),
+        ...(action.payload.location    ? { location: action.payload.location }       : (isDifferentDate ? { location: null } : {})),
+        mlEta: action.payload.mlEta !== undefined ? action.payload.mlEta : (isDifferentDate ? null : current.mlEta),
+        stationEtas: action.payload.stationEtas !== undefined ? action.payload.stationEtas : (isDifferentDate ? {} : (current.stationEtas || {})),
+        ...(newJourneyDate ? { journeyDate: newJourneyDate } : {}),
         ...(action.payload.lastUpdated ? { liveLastUpdated: action.payload.lastUpdated } : {}),
       };
     },
-    /** Rehydrate Redux store from localStorage cache on page load */
     rehydrateFromCache(state, action) {
       const { trainNumber, bundle } = action.payload;
       const key = String(trainNumber);
@@ -386,13 +453,6 @@ const slice = createSlice({
       .addCase(pollTrainLive.rejected, (state, action) => {
         const key = String(action.meta.arg.trainNumber);
         state.byNumber[key] = { ...(state.byNumber[key] || {}), liveError: action.payload };
-      })
-      .addCase(fetchStationEta.fulfilled, (state, action) => {
-        const key = String(action.payload.trainNumber);
-        state.byNumber[key] = {
-          ...(state.byNumber[key] || {}),
-          stationEtas: { ...(state.byNumber[key]?.stationEtas || {}), [action.payload.stationCode]: action.payload.data },
-        };
       })
       .addCase(fetchTrainsBetween.fulfilled, (state, action) => { state.between = action.payload; })
       .addCase(requestTrainRefresh.fulfilled, (state, action) => { state.refreshAccepted = action.payload; });

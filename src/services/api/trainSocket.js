@@ -31,7 +31,7 @@ export class TrainLiveTracker {
 
       socket.onopen = () => {
         if (this.isDestroyed) {
-          try { socket.close(1000, 'Destroyed'); } catch (_) {}
+          try { socket.close(1000, 'Destroyed'); } catch { /* ignore */ }
           return;
         }
         this.reconnectDelay = 3000;
@@ -43,7 +43,7 @@ export class TrainLiveTracker {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             try {
               this.ws.send(JSON.stringify({ action: 'ping' }));
-            } catch (e) {
+            } catch {
               // ignore
             }
           }
@@ -108,10 +108,12 @@ export class TrainLiveTracker {
           socket.onopen = () => {
             try {
               socket.close(1000, 'Client closed');
-            } catch (_) {}
+            } catch {
+              /* ignore */
+            }
           };
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
     }

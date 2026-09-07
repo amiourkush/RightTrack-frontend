@@ -3,12 +3,12 @@ import { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../hooks/reduxHooks';
 import { saveAvatar, savePassword, saveProfile, loadAccount } from '../features/user/userSlice';
 import { setAuthUser } from '../features/auth/authSlice';
-import Spinner from '../components/common/Spinner';
 
 export default function Profile() {
   const dispatch = useAppDispatch(); const authUser = useAppSelector((state) => state.auth.user); const { profile, loading, error } = useAppSelector((state) => state.user);
   const [form, setForm] = useState({ fullName:'', phoneNumber:'', preferredLanguage:'en', startStationCode:'', destinationStationCode:'', bio:'' }); const [passwords, setPasswords] = useState({ currentPassword:'', newPassword:'' }); const [passwordMsg, setPasswordMsg] = useState(''); const [avatarUrl, setAvatarUrl] = useState(''); const [saved, setSaved] = useState(false);
   useEffect(() => { if (!profile) dispatch(loadAccount()); }, [dispatch, profile]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { if (profile) setForm({ fullName:profile.fullName||'', phoneNumber:profile.phoneNumber||'', preferredLanguage:profile.preferredLanguage||'en', startStationCode:profile.startStationCode||'', destinationStationCode:profile.destinationStationCode||'', bio:profile.bio||'' }); setAvatarUrl(profile?.avatarUrl || ''); }, [profile]);
   const updateField = (key, value) => setForm((p) => ({...p, [key]:value}));
   const submit = async (e) => { e.preventDefault(); const result = await dispatch(saveProfile(form)); if (saveProfile.fulfilled.match(result)) { dispatch(setAuthUser({...authUser, ...result.payload})); setSaved(true); setTimeout(()=>setSaved(false),1500); } };

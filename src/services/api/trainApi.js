@@ -13,8 +13,22 @@ export const getTrainEta = (trainNumber, journeyDate) => api.get(`/api/v1/trains
 export const getStationEta = (trainNumber, stationCode, journeyDate) => api.get(`/api/v1/trains/${encodeURIComponent(trainNumber)}/eta/${encodeURIComponent(stationCode)}`, { params: journeyDate ? {journeyDate} : undefined, timeout:15000 });
 export const getTrainsBetween = ({from,to,journeyDate}) => api.get('/api/v1/trains/between', { params:{from,to,...(journeyDate?{journeyDate}:{})}, timeout:20000 });
 export const refreshTrain = (trainNumber, journeyDate) => api.post(`/api/v1/trains/${encodeURIComponent(trainNumber)}/refresh`, null, { params: journeyDate ? {journeyDate} : undefined, timeout:10000 });
-export const getLiveEtaML = (trainNumber) => api.get(`/api/v1/trains/live-eta/${encodeURIComponent(trainNumber)}`, { timeout:15000 });
-export const predictEta = (payload) => api.post('/api/v1/trains/eta/predict', payload, { timeout:15000 });
+export const ML_BASE_URL = 'https://final-live-eta-api.onrender.com';
+
+/**
+ * RailAI Live ETA API — LightGBM ML Predict Endpoint
+ * Base URL: https://final-live-eta-api.onrender.com
+ */
+export const predictLiveEta = (payload) =>
+  axios.post(`${ML_BASE_URL}/predict`, payload, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 15000,
+  });
+
+/**
+ * Legacy alias for predictEta
+ */
+export const predictEta = predictLiveEta;
 
 /**
  * RailRadar Direct Live Tracking API
@@ -22,6 +36,14 @@ export const predictEta = (payload) => api.post('/api/v1/trains/eta/predict', pa
  */
 export const getRailRadarLive = async (trainNumber) => {
   const url = `https://railradar.in/app/v1/trains/${encodeURIComponent(trainNumber)}/live?geometry=false&includeCoordinates=false`;
+  return axios.get(url, { timeout: 10000 });
+};
+
+/**
+ * RailRadar Historical Live Run API (for 4 calendar days before journey date)
+ */
+export const getRailRadarHistoricalRun = async (trainNumber, dateStr) => {
+  const url = `https://railradar.in/app/v1/trains/${encodeURIComponent(trainNumber)}/live?date=${encodeURIComponent(dateStr)}&geometry=false&includeCoordinates=false`;
   return axios.get(url, { timeout: 10000 });
 };
 

@@ -17,6 +17,7 @@ export default function SearchBox({
 
   useEffect(() => {
     skipSearchRef.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setValue(initialValue || '');
     setDropdownOpen(false);
   }, [initialValue]);
@@ -42,6 +43,7 @@ export default function SearchBox({
 
     const q = value.trim();
     if (!q || !/^\d{5}$/.test(q)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDropdownOpen(false);
       setDropdownItems([]);
       setDropdownLoading(false);
@@ -133,7 +135,7 @@ export default function SearchBox({
           </button>
         )}
         <button className="search-submit" type="submit" aria-label="Search">
-          <Search size={16} />
+          <Search size={16} className="text-white" strokeWidth={2.2} />
         </button>
       </form>
 

@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Route, Routes } from 'react-router-dom';
 import { lazy, Suspense, useEffect } from 'react';
 import { useAppDispatch } from './hooks/reduxHooks';
 import { restoreSession } from './features/auth/authSlice';

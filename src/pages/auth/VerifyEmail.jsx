@@ -13,6 +13,7 @@ export default function VerifyEmail() {
   const [otp, setOtp] = useState(''); const [loading, setLoading] = useState(false); const [resending, setResending] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [seconds, setSeconds] = useState(45);
   const inputRefs = useRef([]);
   useEffect(() => { if (seconds <= 0) return undefined; const id = setInterval(() => setSeconds((value) => Math.max(0, value - 1)), 1000); return () => clearInterval(id); }, [seconds]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setEditingEmail(!initialEmail); }, [initialEmail]);
   const masked = useMemo(() => { const [name, domain] = email.split('@'); if (!name || !domain) return email; return `${name.slice(0,2)}${'*'.repeat(Math.max(2,name.length-2))}@${domain}`; }, [email]);
   const verify = async (event) => { event.preventDefault(); if (!email.trim()) { setError('Enter the email address used to register.'); return; } setLoading(true); setError(''); try { await verifyEmailOtp({ email: email.trim(), otp }); setNotice('Email verified successfully.'); setTimeout(() => navigate(`/login?email=${encodeURIComponent(email.trim())}`, { replace: true }), 650); } catch (err) { setError(getApiErrorMessage(err, 'Invalid or expired OTP.')); } finally { setLoading(false); } };

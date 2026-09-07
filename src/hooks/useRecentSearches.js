@@ -1,12 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const KEY = 'railai.recentSearches';
-const LIMIT = 8;
+const LIMIT = 4;
 
 function readRecentSearches() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(KEY) || '[]');
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Deduplicate and enforce max 4 on read
+    const seen = new Set();
+    const result = [];
+    for (const item of parsed) {
+      const num = String(item?.number || item?.trainNumber || '');
+      if (num && !seen.has(num)) {
+        seen.add(num);
+        result.push(item);
+        if (result.length >= LIMIT) break;
+      }
+    }
+    if (parsed.length !== result.length) {
+      try {
+        localStorage.setItem(KEY, JSON.stringify(result));
+      } catch {
+        // ignore
+      }
+    }
+    return result;
   } catch {
     return [];
   }

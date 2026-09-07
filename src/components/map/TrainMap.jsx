@@ -4,9 +4,9 @@ import {
   formatTimeOnly,
   getDistanceCovered,
   getLiveSequence,
+  getMainStops,
   getMergedRouteStops,
   getStationEtaPredictions,
-  isMainHalt,
   normalizeLive,
   stationCode,
   stationName,
@@ -39,20 +39,20 @@ function calcBearing(aLat, aLng, bLat, bLng) {
 
 // ── Info window HTML ──────────────────────────────────────────────────────────
 
-function htmlInfoWindow(stop, etaPred, timeFormat) {
-  const arr   = etaPred?.arrivalEta     ? formatTimeOnly(etaPred.arrivalEta,     timeFormat) : '—';
-  const dep   = etaPred?.departureEta   ? formatTimeOnly(etaPred.departureEta,   timeFormat) : '—';
+function htmlInfoWindow(stop, etaPred, timeFormat, isRunning) {
+  const arr   = isRunning ? (etaPred?.arrivalEta ? formatTimeOnly(etaPred.arrivalEta, timeFormat) : '...') : '...';
+  const dep   = isRunning ? (etaPred?.departureEta ? formatTimeOnly(etaPred.departureEta, timeFormat) : '...') : '...';
   const schedA = stop?.scheduledArrivalTime   ? formatTimeOnly(stop.scheduledArrivalTime,   timeFormat) : '—';
   const schedD = stop?.scheduledDepartureTime ? formatTimeOnly(stop.scheduledDepartureTime, timeFormat) : '—';
   const code  = stationCode(stop);
   const name  = stationName(stop);
-  const tone  = etaPred?.arrivalTone || 'on-time';
+  const tone  = isRunning ? (etaPred?.arrivalTone || 'on-time') : 'unknown';
   return `<div class="google-map-info">
     <div class="map-info-title"><strong>${name}</strong><span>${code}</span></div>
     <div class="map-info-grid"><span>Scheduled Arr.</span><b>${schedA}</b></div>
     <div class="map-info-grid"><span>ETA Arrival</span><b class="google-${tone}">${arr}</b></div>
     <div class="map-info-grid"><span>Scheduled Dep.</span><b>${schedD}</b></div>
-    <div class="map-info-grid"><span>ETA Dep.</span><b class="google-${etaPred?.departureTone || 'on-time'}">${dep}</b></div>
+    <div class="map-info-grid"><span>ETA Dep.</span><b class="google-${isRunning ? (etaPred?.departureTone || 'on-time') : 'unknown'}">${dep}</b></div>
     <div class="map-info-grid"><span>Platform</span><b>${stop?.platform || '—'}</b></div>
   </div>`;
 }
@@ -307,7 +307,7 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
 
   // ── 1. Main-halt markers (only main stations, deduplicated) ─────────────
   const mainHalts = useMemo(() => {
-    const raw = stops.filter((s, i, arr) => isMainHalt(s, i, arr));
+    const raw = getMainStops(stops);
     const seen = new Set();
     return raw.filter((s) => {
       const code = stationCode(s)?.toUpperCase();
@@ -485,13 +485,13 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
 
       const etaPred = getStationEtaPredictions(train, stop);
       marker.addListener('mouseover', () => {
-        infoRef.current?.setContent(htmlInfoWindow(stop, etaPred, timeFormat));
+        infoRef.current?.setContent(htmlInfoWindow(stop, etaPred, timeFormat, isRunning));
         infoRef.current?.open({ map: mapRef.current, anchor: marker });
       });
       marker.addListener('mouseout', () => infoRef.current?.close());
       markersRef.current.push(marker);
     });
-  }, [mainHalts, mapStatus, train, timeFormat]);
+  }, [mainHalts, mapStatus, train, timeFormat, isRunning]);
 
   // ── Effect D: Animated directional train marker ───────────────────────────
   useEffect(() => {

@@ -37,7 +37,7 @@ export function useTrain(trainNumber, journeyDate, { poll = true, intervalSecond
       dispatch(mergeLiveTelemetry({
         trainNumber: normalized,
         live: cachedLive.live,
-        ...(cachedLive.eta         ? { eta: cachedLive.eta }                 : {}),
+        ...(cachedLive.mlEta       ? { mlEta: cachedLive.mlEta }             : {}),
         ...(cachedLive.stationEtas ? { stationEtas: cachedLive.stationEtas } : {}),
         journeyDate: cachedLive.journeyDate || journeyDate,
         lastUpdated: cachedLive.liveLastUpdated || Date.now(),

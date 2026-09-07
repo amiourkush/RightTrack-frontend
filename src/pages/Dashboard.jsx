@@ -7,7 +7,7 @@ import TrainCard from '../components/trains/TrainCard';
 import { useSavedTrains } from '../hooks/useSavedTrains';
 import { useRecentSearches, addRecentSearch } from '../hooks/useRecentSearches';
 import { searchTrains, setSearchQuery } from '../features/trains/trainSlice';
-import { selectSearch, selectSearchError, selectSearchLoading } from '../features/trains/trainSelectors';
+import { selectSearch, selectSearchLoading } from '../features/trains/trainSelectors';
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -19,7 +19,6 @@ export default function Dashboard() {
 
   const searchResults = useAppSelector(selectSearch);
   const searchLoading = useAppSelector(selectSearchLoading);
-  const searchError = useAppSelector(selectSearchError);
 
   const displayName = user?.fullName?.split(' ')[0] || 'there';
 
@@ -137,8 +136,8 @@ export default function Dashboard() {
               </button>
             </div>
             {recent.length ? (
-              <div className="grid min-h-0 gap-2.5 overflow-y-auto pb-3 pr-1 no-scrollbar">
-                {recent.slice(0, 5).map((train) => (
+              <div className="grid min-h-0 gap-2 overflow-y-auto pb-2 pr-1 no-scrollbar">
+                {recent.slice(0, 4).map((train) => (
                   <TrainCard key={train.number} train={train} variant="summary"/>
                 ))}
               </div>

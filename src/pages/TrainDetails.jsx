@@ -7,7 +7,6 @@ import RouteTimeline from '../components/trains/RouteTimeline';
 import TrainMap from '../components/map/TrainMap';
 import Spinner from '../components/common/Spinner';
 import { useSavedTrains } from '../hooks/useSavedTrains';
-import { getStationEta } from '../services/api/trainApi';
 import {
   formatTimeOnly,
   getDistanceCovered,
@@ -16,6 +15,7 @@ import {
   getNextMainStationDelay,
   getStationEtaPredictions,
   getTotalDistance,
+  isTrainRunning,
   normalizeLive,
   stationCode,
   stationName,
@@ -29,7 +29,6 @@ export default function TrainDetails() {
   const { isSaved, toggleSaved } = useSavedTrains();
   const [fullscreen, setFullscreen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [stationEtas, setStationEtas] = useState({});
   const [focusedStation, setFocusedStation] = useState(null);
   const timeFormat = settings?.timeFormat || 'H24';
 
@@ -42,42 +41,34 @@ export default function TrainDetails() {
   const hasStatic = Boolean((train?.details || details.routeStops) && (train?.route || stops.length > 0));
   const isInitialLoading = !hasStatic && Boolean(train?.loading);
 
-  // On-demand fetch of station ETA only if user focuses on a specific station not already present
-  useEffect(() => {
-    if (!trainNumber || !focusedStation) return;
-    const code = stationCode(focusedStation);
-    if (!code || (train?.stationEtas && train.stationEtas[code.toUpperCase()])) return;
-
-    let active = true;
-    getStationEta(trainNumber, code, live.journeyDate)
-      .then((res) => {
-        if (active && res?.data) {
-          setStationEtas((prev) => ({ ...prev, [code.toUpperCase()]: res.data }));
-        }
-      })
-      .catch(() => {});
-
-    return () => {
-      active = false;
-    };
-  }, [trainNumber, focusedStation, train?.stationEtas, live.journeyDate]);
-
-  const allStationEtas = useMemo(() => ({ ...(train?.stationEtas || {}), ...stationEtas }), [train?.stationEtas, stationEtas]);
-  const trainWithEtas = useMemo(() => ({ ...train, stationEtas: allStationEtas }), [train, allStationEtas]);
-
-  const total = getTotalDistance(trainWithEtas) || Number(details.distanceKm ?? stops.at(-1)?.distanceKm ?? 0);
-  const covered = getDistanceCovered(trainWithEtas);
-  const nextMainStation = getNextMainStation(trainWithEtas);
-  const nextMainDelay = getNextMainStationDelay(trainWithEtas);
+  const total = getTotalDistance(train) || Number(details.distanceKm ?? stops.at(-1)?.distanceKm ?? 0);
+  const covered = getDistanceCovered(train);
+  const nextMainStation = useMemo(() => getNextMainStation(train), [train]);
+  const nextMainDelay = useMemo(() => getNextMainStationDelay(train), [train]);
+  const nextMainPred = useMemo(() => (nextMainStation ? getStationEtaPredictions(train, nextMainStation) : null), [train, nextMainStation]);
   const last = live.lastUpdatedAt || location.lastUpdatedAt;
+  const isRunning = isTrainRunning(train);
 
-  // Active Delay displayed at the top: changes as next station changes, or reflects user-focused station
+  // Section 1, 12, 13: TOP ETA = predicted ARRIVAL of NEXT MAIN STATION.
+  // Delay = predicted DELAY at same NEXT MAIN STATION.
+  // When train is not running: TOP ETA = "...", delay = "...".
   const currentTopDelay = useMemo(() => {
+    if (!isRunning) {
+      return {
+        minutes: null,
+        label: '...',
+        tone: 'unknown',
+        stationName: nextMainStation ? stationName(nextMainStation) : '',
+        stationCode: nextMainStation ? stationCode(nextMainStation) : '',
+        etaTime: null,
+        isFocused: false,
+      };
+    }
     if (focusedStation) {
-      const pred = getStationEtaPredictions(trainWithEtas, focusedStation);
+      const pred = getStationEtaPredictions(train, focusedStation);
       return {
         minutes: pred.delayMinutes,
-        label: pred.delayLabel,
+        label: pred.arrivalDelayLabel || pred.delayLabel,
         tone: pred.arrivalTone !== 'unknown' ? pred.arrivalTone : pred.generalTone,
         stationName: stationName(focusedStation),
         stationCode: stationCode(focusedStation),
@@ -86,11 +77,15 @@ export default function TrainDetails() {
       };
     }
     return {
-      ...nextMainDelay,
-      etaTime: nextMainStation ? getStationEtaPredictions(trainWithEtas, nextMainStation)?.arrivalEta : null,
+      minutes: nextMainPred?.delayMinutes ?? nextMainDelay.minutes,
+      label: nextMainPred?.arrivalDelayLabel || nextMainPred?.delayLabel || nextMainDelay.label,
+      tone: nextMainPred?.arrivalTone !== 'unknown' ? nextMainPred?.arrivalTone : (nextMainPred?.generalTone || nextMainDelay.tone),
+      stationName: nextMainStation ? stationName(nextMainStation) : '',
+      stationCode: nextMainStation ? stationCode(nextMainStation) : '',
+      etaTime: nextMainPred?.arrivalEta || null,
       isFocused: false,
     };
-  }, [focusedStation, nextMainDelay, nextMainStation, trainWithEtas]);
+  }, [isRunning, focusedStation, nextMainStation, nextMainPred, nextMainDelay, train]);
 
   const trainName = details.trainName ?? train?.search?.name ?? train?.name ?? `Train ${trainNumber}`;
 
@@ -236,11 +231,9 @@ export default function TrainDetails() {
                   <span className="stat-subtext text-[10px] text-[#527072] mt-0.5 block font-medium">
                     {currentTopDelay.isFocused ? 'Selected: ' : 'Approaching: '}
                     <b>{currentTopDelay.stationName}</b>
-                    {currentTopDelay.etaTime && (
-                      <span className="ml-1 text-[#0d716a] font-mono-ui font-semibold">
-                        (ETA {formatTimeOnly(currentTopDelay.etaTime, timeFormat)})
-                      </span>
-                    )}
+                    <span className="ml-1 text-[#0d716a] font-mono-ui font-semibold">
+                      (ETA {isRunning && currentTopDelay.etaTime ? formatTimeOnly(currentTopDelay.etaTime, timeFormat) : '...'})
+                    </span>
                   </span>
                 )}
               </div>
@@ -257,14 +250,14 @@ export default function TrainDetails() {
               </div>
             </div>
             <RouteTimeline
-              train={trainWithEtas}
+              train={train}
               timeFormat={timeFormat}
               onSelectStation={(st) => setFocusedStation(st)}
               focusedStationCode={focusedStation ? stationCode(focusedStation) : null}
             />
           </div>
           <TrainMap
-            train={trainWithEtas}
+            train={train}
             fullscreen={fullscreen}
             onToggleFullscreen={() => setFullscreen((v) => !v)}
             onRefresh={refresh}

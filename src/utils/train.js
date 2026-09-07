@@ -95,6 +95,17 @@ export function addMinutesToTime(value, minutes) {
   return `${String(Math.floor(next / 60)).padStart(2, '0')}:${String(next % 60).padStart(2, '0')}`;
 }
 
+export function isTimeAfter(a, b) {
+  if (!a || !b) return false;
+  if (isDateTime(a) && isDateTime(b)) {
+    return new Date(a).getTime() > new Date(b).getTime();
+  }
+  const minA = extractClockMinutes(a);
+  const minB = extractClockMinutes(b);
+  if (minA == null || minB == null) return false;
+  return minA > minB;
+}
+
 export function unwrapData(payload) {
   return payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : payload;
 }
@@ -239,23 +250,42 @@ export function getRouteStops(train) {
 }
 
 function normalizeStop(stop) {
+  let isHalt;
+  if (typeof stop?.isHalt === 'boolean') {
+    isHalt = stop.isHalt;
+  } else if (stop?.isHalt === 'true' || stop?.isHalt === 1) {
+    isHalt = true;
+  } else if (stop?.isHalt === 'false' || stop?.isHalt === 0) {
+    isHalt = false;
+  } else {
+    isHalt = undefined;
+  }
+
   return {
     ...stop,
     sequence: Number(stop?.sequence ?? 0),
-    stationCode: stop?.stationCode ?? stop?.code ?? '',
-    stationName: stop?.stationName ?? stop?.name ?? stop?.code ?? '',
-    isHalt: stop?.isHalt !== false,
+    stationCode: stop?.stationCode ?? stop?.code ?? stop?.station?.code ?? '',
+    stationName: stop?.stationName ?? stop?.name ?? stop?.station?.name ?? stop?.code ?? '',
+    isHalt,
     platform: stop?.platform ?? null,
     scheduledArrivalTime: stop?.scheduledArrivalTime ?? stop?.scheduledArrival ?? stop?.arrivalTime ?? null,
     scheduledDepartureTime: stop?.scheduledDepartureTime ?? stop?.scheduledDeparture ?? stop?.departureTime ?? null,
-    latitude: stop?.latitude ?? stop?.lat ?? null,
-    longitude: stop?.longitude ?? stop?.lng ?? null,
+    actualArrivalTime: stop?.actualArrivalTime ?? stop?.actualArrival ?? null,
+    actualDepartureTime: stop?.actualDepartureTime ?? stop?.actualDeparture ?? null,
+    actualArrival: stop?.actualArrival ?? stop?.actualArrivalTime ?? null,
+    actualDeparture: stop?.actualDeparture ?? stop?.actualDepartureTime ?? null,
+    delayArrival: stop?.delayArrival != null ? Number(stop.delayArrival) : null,
+    delayDeparture: stop?.delayDeparture != null ? Number(stop.delayDeparture) : null,
+    status: stop?.status ?? stop?.locationStatus ?? null,
+    latitude: stop?.latitude ?? stop?.lat ?? stop?.station?.lat ?? null,
+    longitude: stop?.longitude ?? stop?.lng ?? stop?.station?.lng ?? null,
     distanceKm: stop?.distanceKm ?? stop?.distance ?? null,
     speedToNextStationKmph: stop?.speedToNextStationKmph ?? null,
   };
 }
 
 export function getMergedRouteStops(train) {
+  const liveRoute = Array.isArray(train?.live?.route) ? train.live.route : Array.isArray(train?.route?.route) ? train.route.route : [];
   const details = Array.isArray(train?.details?.routeStops) ? train.details.routeStops : [];
   const routeStations = Array.isArray(train?.route?.routeStations) ? train.route.routeStations : Array.isArray(train?.route?.properties?.routeStations) ? train.route.properties.routeStations : [];
   const routeStops = Array.isArray(train?.route?.stops) ? train.route.stops : Array.isArray(train?.route?.properties?.stops) ? train.route.properties.stops : [];
@@ -269,7 +299,7 @@ export function getMergedRouteStops(train) {
     ? train.details.intermediateStops
     : [];
 
-  const allSources = [routeStops, details, routeStations, rawStops, rawStations, rawIntermediates];
+  const allSources = [liveRoute, routeStops, details, routeStations, rawStops, rawStations, rawIntermediates];
   const merged = new Map();
 
   for (const source of allSources) {
@@ -288,12 +318,21 @@ export function getMergedRouteStops(train) {
           stationName: (stop.stationName && stop.stationName !== stop.stationCode) ? stop.stationName : prev.stationName,
           scheduledArrivalTime: stop.scheduledArrivalTime || prev.scheduledArrivalTime,
           scheduledDepartureTime: stop.scheduledDepartureTime || prev.scheduledDepartureTime,
+          actualArrivalTime: stop.actualArrivalTime || prev.actualArrivalTime || null,
+          actualDepartureTime: stop.actualDepartureTime || prev.actualDepartureTime || null,
+          actualArrival: stop.actualArrival || prev.actualArrival || null,
+          actualDeparture: stop.actualDeparture || prev.actualDeparture || null,
+          delayArrival: stop.delayArrival != null ? stop.delayArrival : prev.delayArrival,
+          delayDeparture: stop.delayDeparture != null ? stop.delayDeparture : prev.delayDeparture,
+          status: stop.status || prev.status,
           platform: (stop.platform != null && stop.platform !== '' && stop.platform !== '-' && stop.platform !== 'null') ? stop.platform : prev.platform,
           latitude: stop.latitude ?? prev.latitude,
           longitude: stop.longitude ?? prev.longitude,
-          distanceKm: stop.distanceKm ?? prev.distanceKm,
-          isHalt: stop.isHalt !== false && prev.isHalt !== false,
-          speedToNextStationKmph: stop.speedToNextStationKmph ?? prev.speedToNextStationKmph,
+          isHalt: stop.isHalt === false || prev.isHalt === false
+            ? false
+            : typeof stop.isHalt === 'boolean'
+            ? stop.isHalt
+            : prev.isHalt,
         });
       }
     }
@@ -333,44 +372,34 @@ export function isMainHalt(stop, index, allStops) {
   if (index === 0) return true; // Origin is always main
   if (index === allStops.length - 1) return true; // Destination is always main
 
-  // 1. Explicit non-halt
+  // 1. Explicit non-halt: RailRadar's stop.isHalt === false is authoritative
   if (stop.isHalt === false) return false;
 
-  // 2. Technical 0-minute pass-through stops without platform (like Lohta, Bankat in 15119)
-  const isZeroHalt = Boolean(
-    stop.scheduledArrivalTime &&
-    stop.scheduledDepartureTime &&
-    stop.scheduledArrivalTime === stop.scheduledDepartureTime
-  );
-  const hasPlat = stop.platform != null &&
-    String(stop.platform).trim() !== '' &&
-    String(stop.platform).trim() !== 'null' &&
-    String(stop.platform).trim() !== '-' &&
-    String(stop.platform).trim() !== '0';
-
-  if (isZeroHalt && !hasPlat) return false;
-
-  // 3. Check if allStops has explicit non-halts or pass-throughs
-  const hasDistinctIntermediates = allStops.some((s) =>
-    s.isHalt === false ||
-    (s.scheduledArrivalTime && s.scheduledDepartureTime && s.scheduledArrivalTime === s.scheduledDepartureTime && (!s.platform || s.platform === '-'))
-  );
-
-  if (hasDistinctIntermediates) {
-    return stop.isHalt !== false && (hasPlat || !isZeroHalt);
+  // 2. Technical 0-minute pass-through stops (scheduled arrival === scheduled departure)
+  // Platform presence must NOT override the fact that this is a 0-minute pass-through
+  const arr = stop.scheduledArrivalTime || stop.scheduledArrival;
+  const dep = stop.scheduledDepartureTime || stop.scheduledDeparture;
+  if (arr && dep) {
+    if (arr === dep) return false;
+    const tArr = formatTimeOnly(arr);
+    const tDep = formatTimeOnly(dep);
+    if (tArr !== '—' && tDep !== '—' && tArr === tDep) return false;
   }
 
-  // 4. For trains where all stations are marked as halts (like 12919 with 51 stops):
-  // We classify major railway junctions or major halts (>= 5 min halt) as main stations
-  // so the route timeline groups minor stops into clean collapsible intermediate accordions!
-  if (allStops.length > 12) {
-    const isMajorJunction = /(\bJN\b|\bJUNCTION\b|\bCANTT\b|\bCENTRAL\b|\bTERMINUS\b|\bTERMINAL\b)/i.test(stop.stationName || '');
-    const haltDiff = getDelayMinutes(stop.scheduledArrivalTime, stop.scheduledDepartureTime);
-    const isMajorHalt = haltDiff != null && haltDiff >= 5;
-    return isMajorJunction || isMajorHalt;
+  // 3. When the route contains explicit non-halts / pass-throughs (e.g. RailRadar live route):
+  // An intermediate station is MAIN if and only if it is an explicit commercial halt
+  const hasDistinctPassThroughs = allStops.some((s) => s.isHalt === false);
+  if (hasDistinctPassThroughs) {
+    return stop.isHalt === true;
   }
 
+  // 4. For timetable datasets where isHalt is omitted across all stops:
   return true;
+}
+
+export function getMainStops(stops) {
+  if (!stops || !stops.length) return [];
+  return stops.filter((s, i) => isMainHalt(s, i, stops));
 }
 
 const CORRIDOR_INTERMEDIATES = {
@@ -553,31 +582,10 @@ export function getMainSections(stops) {
     });
   }
 
-  const isMain = stops.map((s, i) => isMainHalt(s, i, stops));
-
-  // Safeguard: ensure stretches don't exceed 8 intermediate stations without a main station
-  let lastMainIdx = 0;
-  for (let i = 1; i < stops.length; i++) {
-    if (isMain[i]) {
-      if (i - lastMainIdx > 8) {
-        let bestIdx = Math.floor((lastMainIdx + i) / 2);
-        let maxHalt = -1;
-        for (let j = lastMainIdx + 1; j < i; j++) {
-          const h = getDelayMinutes(stops[j].scheduledArrivalTime, stops[j].scheduledDepartureTime) || 0;
-          if (h > maxHalt) {
-            maxHalt = h;
-            bestIdx = j;
-          }
-        }
-        isMain[bestIdx] = true;
-      }
-      lastMainIdx = i;
-    }
-  }
-
+  // Authoritative main classification: strictly use isMainHalt without artificial gap promotion
   const mains = stops
-    .map((stop, i) => ({ stop, index: i }))
-    .filter((_, idx) => isMain[idx]);
+    .map((stop, index) => ({ stop, index }))
+    .filter((item) => isMainHalt(item.stop, item.index, stops));
 
   return mains.map((item, i) => {
     const nextStop = mains[i + 1]?.stop || null;
@@ -741,17 +749,29 @@ export function getLiveSpeed(train) {
   return null;
 }
 
+export function isTrainRunning(train) {
+  const live = normalizeLive(train?.live || {});
+  const status = String(live.status || '').trim().toUpperCase();
+  return status === 'RUNNING';
+}
+
 export function getTrainDelayInfo(train) {
   if (!train) return { minutes: null, label: '—', tone: 'unknown', isLate: false, isEarly: false, isOnTime: false };
   const live = normalizeLive(train.live || {});
-  const mlEta = train.mlEta || {};
-  const eta = normalizeEta(train.eta || {});
+  const status = String(live.status || '').trim().toUpperCase();
+  const isRunning = status === 'RUNNING';
+  const isCompleted = /COMPLET|TERMINAT/.test(status);
 
+  // If train is not running and not completed (e.g. not started, cancelled, etc.)
+  if (!isRunning && !isCompleted) {
+    return { minutes: null, label: '...', tone: 'unknown', isLate: false, isEarly: false, isOnTime: false };
+  }
+
+  const mlEta = train.mlEta || {};
   const rawMinutes =
     live.delayMinutes ??
     mlEta.current_live_delay_minutes ??
-    mlEta.predicted_final_delay_minutes ??
-    eta.currentDelayMinutes;
+    mlEta.predicted_final_delay_minutes;
 
   if (rawMinutes == null || !Number.isFinite(Number(rawMinutes))) {
     return { minutes: null, label: '—', tone: 'unknown', isLate: false, isEarly: false, isOnTime: false };
@@ -772,78 +792,498 @@ export function getTrainDelayInfo(train) {
   return { minutes, label, tone: 'late', isLate: true, isEarly: false, isOnTime: false };
 }
 
+/**
+ * Distance-Based Future Station Predictions Resolver
+ *
+ * Implements Prompt Sections 4-11 & 14:
+ * - Train MUST be running (status === 'running')
+ * - Destination anchor: ML predicted_destination_eta
+ * - Distance formula: fraction = (stopDist - currDist) / (destDist - currDist)
+ *   delay = currDelay + fraction * (destDelay - currDelay)
+ * - Departure: if late -> predictedArrival + haltDuration; else -> scheduledDeparture
+ * - Past stations: use actual RailRadar station-level data
+ * - Main stations only: intermediate pass-through stations get no predictions
+ */
+export function calculateFutureStationPredictions(train, mlPrediction) {
+  if (!train) return {};
+  const live = normalizeLive(train.live || {});
+  const status = String(live.status || '').trim().toUpperCase();
 
+  // Rule 4: If not running, DO NOT perform future station ETA distribution
+  if (status !== 'RUNNING') {
+    return {};
+  }
+
+  const allStops = getMergedRouteStops(train);
+  if (!allStops || allStops.length === 0) return {};
+
+  const currentDelayMinutes = typeof live.delayMinutes === 'number' ? live.delayMinutes : Number(live.delayMinutes || 0);
+  const predictedFinalDelay = Number(
+    mlPrediction?.predicted_final_delay_minutes ??
+    mlPrediction?.predictedFinalDelayMinutes ??
+    currentDelayMinutes
+  );
+  const destEta = mlPrediction?.predicted_destination_eta || mlPrediction?.predictedDestinationEta || null;
+
+  // Current train distance and sequence along route
+  const currentCoveredDist = getDistanceCovered(train) ?? Number(live.distanceFromOriginKm ?? 0);
+  const currentSeq = getLiveSequence(train) || Number(live.currentSequence ?? 0);
+
+  // Helper to convert stop times to absolute scheduled minutes for time-based fraction calculation
+  function getStopScheduledEpochMinutes(s, prevEpoch = 0) {
+    const time = s.scheduledArrivalTime || s.scheduledArrival || s.scheduledDepartureTime || s.scheduledDeparture;
+    if (!time) return null;
+    if (isDateTime(time)) {
+      const ms = new Date(time).getTime();
+      if (!Number.isNaN(ms)) return ms / 60000;
+    }
+    const clock = extractClockMinutes(time);
+    if (clock == null) return null;
+    if (prevEpoch > 0) {
+      let candidate = Math.floor(prevEpoch / 1440) * 1440 + clock;
+      while (candidate < prevEpoch - 120) candidate += 1440;
+      return candidate;
+    }
+    return clock;
+  }
+
+  let runningEpoch = 0;
+  const stopsWithEpoch = allStops.map((s) => {
+    const epoch = getStopScheduledEpochMinutes(s, runningEpoch);
+    if (epoch != null) runningEpoch = epoch;
+    return {
+      ...s,
+      scheduledEpochMinutes: epoch,
+    };
+  });
+
+  // Identify active segment where the train is currently running
+  let prevStopIdx = stopsWithEpoch.findIndex((s) => s.sequence === currentSeq);
+  if (prevStopIdx < 0 && currentCoveredDist > 0) {
+    prevStopIdx = stopsWithEpoch.findIndex((s) => Number(s.distanceKm || 0) >= currentCoveredDist) - 1;
+  }
+  if (prevStopIdx < 0) prevStopIdx = 0;
+  const nextStopIdx = Math.min(stopsWithEpoch.length - 1, prevStopIdx + 1);
+
+  const prevStop = stopsWithEpoch[prevStopIdx];
+  const nextStop = stopsWithEpoch[nextStopIdx];
+
+  // Destination stop
+  const destStop = [...stopsWithEpoch].reverse().find((s) => s.isHalt !== false) || stopsWithEpoch.at(-1);
+  const totalRouteDist = Number(destStop?.distanceKm ?? stopsWithEpoch.at(-1)?.distanceKm ?? 0);
+  const remTotalDist = Math.max(1, totalRouteDist - currentCoveredDist);
+
+  // Section 8: Current segment handling using segmentProgress
+  let segProg = live.segmentProgress != null ? Number(live.segmentProgress) : null;
+  if (segProg == null || Number.isNaN(segProg) || segProg < 0) {
+    const prevDist = Number(prevStop.distanceKm || 0);
+    const nextDist = Number(nextStop.distanceKm || 0);
+    if (nextDist > prevDist && currentCoveredDist >= prevDist) {
+      segProg = (currentCoveredDist - prevDist) / (nextDist - prevDist);
+    } else {
+      segProg = 0;
+    }
+  }
+  segProg = Math.max(0, Math.min(1, segProg));
+
+  const prevDepEpoch = prevStop.scheduledEpochMinutes;
+  const nextArrEpoch = nextStop.scheduledEpochMinutes;
+  const segScheduledDuration = Math.max(1, (nextArrEpoch != null && prevDepEpoch != null) ? Math.max(0, nextArrEpoch - prevDepEpoch) : 2);
+  const remCurrentSegmentTime = segScheduledDuration * (1 - segProg);
+
+  // Section 7: Scheduled remaining travel duration from CURRENT TRAIN POSITION to any target stop
+  function getRemainingScheduledTime(targetStop) {
+    if (!targetStop) return 0;
+    if (targetStop.sequence <= prevStop.sequence) return 0;
+    if (targetStop.sequence === nextStop.sequence) {
+      return remCurrentSegmentTime;
+    }
+    const additionalScheduled = Math.max(0, (targetStop.scheduledEpochMinutes || 0) - (nextStop.scheduledEpochMinutes || 0));
+    return remCurrentSegmentTime + additionalScheduled;
+  }
+
+  const remTimeToDest = Math.max(1, getRemainingScheduledTime(destStop));
+
+  const predictionsMap = {};
+
+  allStops.forEach((stop, idx) => {
+    const code = stationCode(stop).toUpperCase();
+    if (!code) return;
+
+    const isMain = isMainHalt(stop, idx, allStops);
+    const stopSeq = Number(stop.sequence || (idx + 1));
+    const stopDist = Number(stop.distanceKm ?? 0);
+
+    // Is this station already passed?
+    const isPassed = (currentSeq > 0 && stopSeq < currentSeq) ||
+      (currentCoveredDist > 0 && stopDist > 0 && stopDist < currentCoveredDist - 0.5) ||
+      stop.locationStatus === 'departed' ||
+      stop.status === 'departed' ||
+      stop.hasDeparted === true ||
+      Boolean(stop.actualDeparture || stop.actualDepartureTime);
+
+    // Is this the current station?
+    const isCurrent = !isPassed && ((currentSeq > 0 && stopSeq === currentSeq) ||
+      (String(live.currentStationCode || '').toUpperCase() === code));
+
+    if (isPassed) {
+      // Past station (Section 15): use actual RailRadar station-level data
+      const actArr = stop.actualArrival || stop.actualArrivalTime || null;
+      const actDep = stop.actualDeparture || stop.actualDepartureTime || null;
+      const delArr = stop.delayArrival != null ? Number(stop.delayArrival) : null;
+      const delDep = stop.delayDeparture != null ? Number(stop.delayDeparture) : null;
+      const stationDelay = delDep != null ? delDep : (delArr != null ? delArr : 0);
+
+      predictionsMap[code] = {
+        stationCode: code,
+        stationName: stationName(stop),
+        isMain,
+        isPast: true,
+        actualArrival: actArr,
+        actualDeparture: actDep,
+        predictedArrival: actArr || stop.scheduledArrivalTime,
+        predictedDeparture: actDep || stop.scheduledDepartureTime,
+        delayArrival: delArr,
+        delayDeparture: delDep,
+        predictedDelayMinutes: stationDelay,
+        predictionSource: 'ACTUAL_HISTORY',
+      };
+      return;
+    }
+
+    if (isCurrent) {
+      // Current station: current delay from data.delayMinutes
+      const schedArr = stop.scheduledArrivalTime;
+      const schedDep = stop.scheduledDepartureTime;
+      const haltMinutes = (schedArr && schedDep) ? Math.max(0, getDelayMinutes(schedArr, schedDep) || 0) : 0;
+      const predictedArrival = schedArr ? addMinutesToTime(schedArr, currentDelayMinutes) : null;
+      let predictedDeparture = schedDep ? addMinutesToTime(schedDep, currentDelayMinutes) : null;
+      if (predictedArrival && schedArr && haltMinutes > 0) {
+        const fromHalt = addMinutesToTime(predictedArrival, haltMinutes);
+        if (schedDep && isTimeAfter(fromHalt, schedDep)) {
+          predictedDeparture = fromHalt;
+        } else if (schedDep) {
+          predictedDeparture = schedDep;
+        }
+      }
+
+      predictionsMap[code] = {
+        stationCode: code,
+        stationName: stationName(stop),
+        isMain,
+        isCurrent: true,
+        predictedArrival,
+        predictedDeparture,
+        predictedDelayMinutes: currentDelayMinutes,
+        predictionSource: 'CURRENT_LIVE',
+      };
+      return;
+    }
+
+    // Section 8: Only genuine MAIN stations receive future ML ETA predictions
+    if (!isMain) {
+      predictionsMap[code] = {
+        stationCode: code,
+        stationName: stationName(stop),
+        isMain: false,
+        isFuture: true,
+        predictedArrival: null,
+        predictedDeparture: null,
+        predictedDelayMinutes: null,
+        predictionSource: 'INTERMEDIATE_PASS_THROUGH',
+      };
+      return;
+    }
+
+    // Future station: Scheduled Travel-Time-based calculation (Section 4, 7, 8, 9, 10, 11)
+    const isDestination = (idx === allStops.length - 1) || (code === stationCode(destStop).toUpperCase());
+    let predictedArrival = null;
+    let predictedDelayMinutes;
+
+    if (isDestination && destEta) {
+      // Section 11: Destination anchor
+      predictedArrival = destEta;
+      predictedDelayMinutes = predictedFinalDelay;
+    } else {
+      const remTimeToStation = getRemainingScheduledTime(stopsWithEpoch[idx]);
+      const distFromCurr = Math.max(0, stopDist - currentCoveredDist);
+      const fallbackDistFraction = remTotalDist > 0 ? Math.max(0, Math.min(1, distFromCurr / remTotalDist)) : 1;
+      const fraction = remTimeToDest > 1 ? Math.max(0, Math.min(1, remTimeToStation / remTimeToDest)) : fallbackDistFraction;
+      const calcDelay = currentDelayMinutes + fraction * (predictedFinalDelay - currentDelayMinutes);
+
+      // Section 10: Keep as decimal internally
+      predictedDelayMinutes = calcDelay;
+
+      if (stop.scheduledArrivalTime) {
+        predictedArrival = addMinutesToTime(stop.scheduledArrivalTime, calcDelay);
+      }
+    }
+
+    // Departure calculation (Section 8)
+    let predictedDeparture = null;
+    const schedArr = stop.scheduledArrivalTime;
+    const schedDep = stop.scheduledDepartureTime;
+
+    if (schedDep) {
+      const haltMinutes = (schedArr && schedDep) ? Math.max(0, getDelayMinutes(schedArr, schedDep) || 0) : 0;
+      const isLate = (predictedArrival && schedArr) ? (getDelayMinutes(schedArr, predictedArrival) > 0) : false;
+      if (predictedArrival && isLate) {
+        predictedDeparture = addMinutesToTime(predictedArrival, haltMinutes);
+      } else {
+        predictedDeparture = schedDep;
+      }
+      if (schedDep && isTimeAfter(schedDep, predictedDeparture)) {
+        predictedDeparture = schedDep;
+      }
+    }
+
+    predictionsMap[code] = {
+      stationCode: code,
+      stationName: stationName(stop),
+      isMain,
+      isFuture: true,
+      predictedArrival,
+      predictedDeparture,
+      predictedDelayMinutes,
+      predictionSource: isDestination ? 'ML_DESTINATION_ANCHOR' : 'DISTANCE_RATIO_PREDICTION',
+    };
+  });
+
+  return predictionsMap;
+}
 
 export function getStationEtaPredictions(train, stop) {
-  if (!stop) return { arrivalEta: null, departureEta: null, delayMinutes: 0, arrivalTone: 'unknown', departureTone: 'unknown', generalTone: 'unknown', delayLabel: '—' };
-  const delayInfo = getTrainDelayInfo(train);
-  const fallbackDelay = delayInfo.minutes || 0;
-  const code = stationCode(stop);
+  if (!stop) {
+    return {
+      arrivalEta: null,
+      departureEta: null,
+      delayMinutes: null,
+      arrivalTone: 'unknown',
+      departureTone: 'unknown',
+      generalTone: 'unknown',
+      delayLabel: '...',
+      arrivalDelayLabel: '...',
+      departureDelayLabel: '...',
+    };
+  }
+
+  const live = normalizeLive(train?.live || {});
+  const status = String(live.status || '').trim().toUpperCase();
+  const isRunning = status === 'RUNNING';
+  const isCompleted = /COMPLET|TERMINAT/.test(status);
+  const code = stationCode(stop).toUpperCase();
+  const isPastStop = stop.status === 'departed' || stop.locationStatus === 'departed' || Boolean(stop.actualArrival || stop.actualDeparture);
+
+  // Section 18: If train is NOT running (and not completed):
+  // Past actual information may continue to display normally.
+  // Future MAIN arrival/departure = "..."
+  if (!isRunning && !isCompleted && !isPastStop) {
+    return {
+      arrivalEta: null,
+      departureEta: null,
+      delayMinutes: null,
+      arrivalTone: 'unknown',
+      departureTone: 'unknown',
+      generalTone: 'unknown',
+      delayLabel: '...',
+      arrivalDelayLabel: '...',
+      departureDelayLabel: '...',
+    };
+  }
+
+  // Look for precalculated prediction in train.stationEtas or train.eta
   const explicit = findStationEta(train?.eta, code) || findStationEtaFromMap(train?.stationEtas, code);
 
-  let arrivalEta = null;
-  let departureEta = null;
-  let stationDelay = fallbackDelay;
+  if (explicit) {
+    const schedArr = stop.scheduledArrivalTime;
+    const schedDep = stop.scheduledDepartureTime;
 
-  // 1. Fetch arrival ETA: prefer backend explicit predictedArrival or explicit predictedDelayMinutes
-  if (explicit?.predictedArrival) {
-    arrivalEta = explicit.predictedArrival;
-    if (stop.scheduledArrivalTime) {
-      const diff = getDelayMinutes(stop.scheduledArrivalTime, arrivalEta);
-      if (diff != null) stationDelay = diff;
+    if (explicit.isPast) {
+      // Section 9, 10: Passed stations - preserve RailRadar actual observed data
+      const arrEta = explicit.actualArrival || stop.actualArrival || explicit.predictedArrival || stop.scheduledArrivalTime;
+      const depEta = explicit.actualDeparture || stop.actualDeparture || explicit.predictedDeparture || stop.scheduledDepartureTime;
+
+      const arrDelay = explicit.delayArrival != null
+        ? Number(explicit.delayArrival)
+        : (stop.delayArrival != null
+          ? Number(stop.delayArrival)
+          : (schedArr && arrEta ? getDelayMinutes(schedArr, arrEta) : 0));
+
+      const depDelay = explicit.delayDeparture != null
+        ? Number(explicit.delayDeparture)
+        : (stop.delayDeparture != null
+          ? Number(stop.delayDeparture)
+          : (schedDep && depEta ? getDelayMinutes(schedDep, depEta) : 0));
+
+      const generalDelay = depDelay != null ? depDelay : arrDelay;
+
+      const arrivalTone = arrDelay > 0 ? 'late' : arrDelay < 0 ? 'early' : 'on-time';
+      const departureTone = depDelay > 0 ? 'late' : depDelay < 0 ? 'early' : 'on-time';
+
+      const formattedGeneral = formatDelay(generalDelay);
+      const formattedArr = formatDelay(arrDelay);
+      const formattedDep = formatDelay(depDelay);
+
+      return {
+        arrivalEta: arrEta,
+        departureEta: depEta,
+        delayMinutes: generalDelay,
+        arrivalTone,
+        departureTone,
+        generalTone: formattedGeneral.tone,
+        delayLabel: formattedGeneral.label,
+        arrivalDelayLabel: formattedArr.label,
+        departureDelayLabel: formattedDep.label,
+      };
     }
-  } else if (explicit?.predictedDelayMinutes != null && explicit?.predictionSource !== 'NO_PREDICTION') {
-    stationDelay = Number(explicit.predictedDelayMinutes);
-    if (stop.scheduledArrivalTime) {
-      arrivalEta = addMinutesToTime(stop.scheduledArrivalTime, stationDelay);
+
+    // Future or Current Station (Section 7, 8):
+    if (explicit.isFuture && !explicit.isMain) {
+      return {
+        arrivalEta: null,
+        departureEta: null,
+        delayMinutes: null,
+        arrivalTone: 'unknown',
+        departureTone: 'unknown',
+        generalTone: 'unknown',
+        delayLabel: '...',
+        arrivalDelayLabel: '...',
+        departureDelayLabel: '...',
+      };
     }
-  } else if (stop.scheduledArrivalTime) {
-    arrivalEta = addMinutesToTime(stop.scheduledArrivalTime, fallbackDelay);
+
+    // Do NOT trust RailRadar placeholder delayArrival: 0.
+    // The delay badge MUST be derived directly from predicted vs scheduled timestamps.
+    const arrEta = explicit.predictedArrival || null;
+    const depEta = explicit.predictedDeparture || null;
+
+    let arrDelay = null;
+    if (schedArr && arrEta) {
+      arrDelay = getDelayMinutes(schedArr, arrEta);
+    } else if (explicit.predictedDelayMinutes != null) {
+      arrDelay = Number(explicit.predictedDelayMinutes);
+    }
+
+    let depDelay = null;
+    if (schedDep && depEta) {
+      depDelay = getDelayMinutes(schedDep, depEta);
+    } else if (explicit.predictedDelayMinutes != null) {
+      depDelay = Number(explicit.predictedDelayMinutes);
+    }
+
+    const generalDelay = explicit.predictedDelayMinutes != null
+      ? Number(explicit.predictedDelayMinutes)
+      : (arrDelay != null ? arrDelay : (depDelay != null ? depDelay : 0));
+
+    const arrivalTone = arrDelay != null
+      ? (arrDelay > 0 ? 'late' : arrDelay < 0 ? 'early' : 'on-time')
+      : 'unknown';
+
+    const departureTone = depDelay != null
+      ? (depDelay > 0 ? 'late' : depDelay < 0 ? 'early' : 'on-time')
+      : 'unknown';
+
+    const formattedGeneral = generalDelay != null ? formatDelay(generalDelay) : { label: '...', tone: 'unknown' };
+    const formattedArr = arrDelay != null ? formatDelay(arrDelay) : { label: '...', tone: 'unknown' };
+    const formattedDep = depDelay != null ? formatDelay(depDelay) : { label: '...', tone: 'unknown' };
+
+    return {
+      arrivalEta: arrEta,
+      departureEta: depEta,
+      delayMinutes: generalDelay,
+      arrivalTone,
+      departureTone,
+      generalTone: formattedGeneral.tone,
+      delayLabel: formattedGeneral.label,
+      arrivalDelayLabel: formattedArr.label,
+      departureDelayLabel: formattedDep.label,
+    };
   }
 
-  // 2. Departure ETA = prefer backend explicit predictedDeparture, or Arrival ETA + Halt Time
-  const schedArr = stop.scheduledArrivalTime;
-  const schedDep = stop.scheduledDepartureTime;
-  const haltMinutes = (schedArr && schedDep) ? getDelayMinutes(schedArr, schedDep) : 0;
+  // Fallback if no explicit entry exists:
+  // For passed stations, preserve actual observed timing and delays
+  if (isPastStop) {
+    const arrEta = stop.actualArrival || stop.actualArrivalTime || stop.scheduledArrivalTime;
+    const depEta = stop.actualDeparture || stop.actualDepartureTime || stop.scheduledDepartureTime;
+    const arrDelay = stop.delayArrival != null
+      ? Number(stop.delayArrival)
+      : (stop.scheduledArrivalTime && arrEta ? getDelayMinutes(stop.scheduledArrivalTime, arrEta) : 0);
+    const depDelay = stop.delayDeparture != null
+      ? Number(stop.delayDeparture)
+      : (stop.scheduledDepartureTime && depEta ? getDelayMinutes(stop.scheduledDepartureTime, depEta) : 0);
+    const generalDelay = depDelay != null ? depDelay : arrDelay;
 
-  // Origin station terminates no arrival; Destination station has no departure
-  if (!schedArr) {
-    arrivalEta = null;
+    const arrivalTone = arrDelay > 0 ? 'late' : arrDelay < 0 ? 'early' : 'on-time';
+    const departureTone = depDelay > 0 ? 'late' : depDelay < 0 ? 'early' : 'on-time';
+    const formattedGeneral = formatDelay(generalDelay);
+    const formattedArr = formatDelay(arrDelay);
+    const formattedDep = formatDelay(depDelay);
+
+    return {
+      arrivalEta: arrEta,
+      departureEta: depEta,
+      delayMinutes: generalDelay,
+      arrivalTone,
+      departureTone,
+      generalTone: formattedGeneral.tone,
+      delayLabel: formattedGeneral.label,
+      arrivalDelayLabel: formattedArr.label,
+      departureDelayLabel: formattedDep.label,
+    };
   }
-  if (!schedDep) {
-    departureEta = null;
-  } else if (explicit?.predictedDeparture) {
-    departureEta = explicit.predictedDeparture;
-  } else if (arrivalEta && schedArr && haltMinutes != null && haltMinutes > 0) {
-    departureEta = addMinutesToTime(arrivalEta, haltMinutes);
-  } else if (arrivalEta && schedArr) {
-    departureEta = arrivalEta;
-  } else if (schedDep) {
-    departureEta = addMinutesToTime(schedDep, stationDelay);
-  }
-
-  const arrivalDiff = (schedArr && arrivalEta) ? getDelayMinutes(schedArr, arrivalEta) : stationDelay;
-  const departureDiff = (schedDep && departureEta) ? getDelayMinutes(schedDep, departureEta) : stationDelay;
-
-  const arrivalTone = arrivalDiff != null
-    ? (arrivalDiff > 0 ? 'late' : arrivalDiff < 0 ? 'early' : 'on-time')
-    : delayInfo.tone;
-
-  const departureTone = departureDiff != null
-    ? (departureDiff > 0 ? 'late' : departureDiff < 0 ? 'early' : 'on-time')
-    : delayInfo.tone;
-
-  const formattedDelay = formatDelay(stationDelay);
 
   return {
-    arrivalEta,
-    departureEta,
-    delayMinutes: stationDelay,
-    arrivalTone,
-    departureTone,
-    generalTone: formattedDelay.tone,
-    delayLabel: formattedDelay.label,
+    arrivalEta: null,
+    departureEta: null,
+    delayMinutes: null,
+    arrivalTone: 'unknown',
+    departureTone: 'unknown',
+    generalTone: 'unknown',
+    delayLabel: '...',
+    arrivalDelayLabel: '...',
+    departureDelayLabel: '...',
   };
+}
+
+export function getNextStation(train) {
+  if (!train) return null;
+  const stops = getMergedRouteStops(train);
+  if (!stops.length) return null;
+
+  const live = normalizeLive(train.live || {});
+  const status = String(live.status || '').toUpperCase();
+  const notStarted = /NOT[_ -]?START|SCHEDULED|UPCOMING|YET/.test(status);
+  const completed = /COMPLET|TERMINAT/.test(status);
+
+  if (completed) {
+    return stops.at(-1);
+  }
+  if (notStarted) {
+    return stops[1] || stops[0];
+  }
+
+  // 1. By sequence
+  const sequence = getLiveSequence(train) || Number(live.currentSequence || 0);
+  if (sequence > 0) {
+    const nextBySeq = stops.find((s) => Number(s.sequence) > sequence);
+    if (nextBySeq) return nextBySeq;
+  }
+
+  // 2. By distance covered
+  const covered = getDistanceCovered(train) ?? Number(live.distanceFromOriginKm ?? 0);
+  if (covered != null && covered > 0) {
+    const nextByDist = stops.find((s) => s.distanceKm != null && Number(s.distanceKm) > covered);
+    if (nextByDist) return nextByDist;
+  }
+
+  // 3. By nextHaltCode
+  const nextCode = String(live.nextHaltCode || '').toUpperCase();
+  if (nextCode) {
+    const nextByCode = stops.find((s) => stationCode(s).toUpperCase() === nextCode);
+    if (nextByCode) return nextByCode;
+  }
+
+  return stops[1] || stops.at(-1);
 }
 
 
@@ -866,7 +1306,21 @@ export function getNextMainStation(train) {
     return sections[1]?.main || sections[0]?.main || stops[0];
   }
 
-  // 1. If nextHaltCode matches a station
+  // 1. By sequence (strictly next main station ahead of current sequence)
+  const sequence = getLiveSequence(train) || Number(live.currentSequence || 0);
+  if (sequence > 0) {
+    const nextMainBySeq = sections.find((s) => Number(s.main.sequence) > sequence);
+    if (nextMainBySeq) return nextMainBySeq.main;
+  }
+
+  // 2. By distance covered (strictly next main station ahead of current distance)
+  const covered = getDistanceCovered(train) ?? Number(live.distanceFromOriginKm ?? 0);
+  if (covered != null && covered > 0) {
+    const nextMainByDist = sections.find((s) => s.main.distanceKm != null && Number(s.main.distanceKm) > covered + 0.1);
+    if (nextMainByDist) return nextMainByDist.main;
+  }
+
+  // 3. If nextHaltCode matches a station
   const nextCode = String(live.nextHaltCode || '').toUpperCase();
   if (nextCode) {
     const directMain = sections.find((s) => stationCode(s.main).toUpperCase() === nextCode);
@@ -876,27 +1330,29 @@ export function getNextMainStation(train) {
     if (sectionWithInter && sectionWithInter.next) return sectionWithInter.next;
   }
 
-  // 2. By sequence
-  const sequence = getLiveSequence(train);
-  if (sequence > 0) {
-    const nextMainBySeq = sections.find((s) => Number(s.main.sequence) > sequence);
-    if (nextMainBySeq) return nextMainBySeq.main;
-  }
-
-  // 3. By distance covered
-  const covered = getDistanceCovered(train);
-  if (covered != null && covered > 0) {
-    const nextMainByDist = sections.find((s) => s.main.distanceKm != null && Number(s.main.distanceKm) > covered);
-    if (nextMainByDist) return nextMainByDist.main;
-  }
-
   // Fallback to next section
   return sections[1]?.main || sections.at(-1)?.main || stops.at(-1);
 }
 
 export function getNextMainStationDelay(train) {
-  if (!train) return { minutes: null, label: '—', tone: 'unknown', isLate: false, isEarly: false, isOnTime: false, station: null, stationName: '' };
+  if (!train) return { minutes: null, label: '...', tone: 'unknown', isLate: false, isEarly: false, isOnTime: false, station: null, stationName: '' };
   const nextStation = getNextMainStation(train);
+  const running = isTrainRunning(train);
+
+  if (!running) {
+    return {
+      minutes: null,
+      label: '...',
+      tone: 'unknown',
+      isLate: false,
+      isEarly: false,
+      isOnTime: false,
+      station: nextStation,
+      stationName: nextStation ? stationName(nextStation) : '',
+      stationCode: nextStation ? stationCode(nextStation) : '',
+    };
+  }
+
   const trainDelay = getTrainDelayInfo(train);
   if (!nextStation) return { ...trainDelay, station: null, stationName: '' };
 
@@ -908,7 +1364,7 @@ export function getNextMainStationDelay(train) {
   if (rawMinutes == null || !Number.isFinite(Number(rawMinutes))) {
     return {
       minutes: null,
-      label: '—',
+      label: '...',
       tone: 'unknown',
       isLate: false,
       isEarly: false,

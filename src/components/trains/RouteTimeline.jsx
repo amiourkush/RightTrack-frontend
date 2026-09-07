@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, TrainFront } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   formatTimeOnly,
   getDelayMinutes,
@@ -58,6 +58,17 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
   const sequence = running ? getLiveSequence(train) : 0;
   const totalDist = getTotalDistance(train);
   const coveredDist = getDistanceCovered(train);
+  const scrollContainerRef = useRef(null);
+  const autoScrolledRef = useRef(false);
+  const currentTrainNumber = train?.details?.trainNumber || train?.number || train?.trainNumber;
+  const lastTrainNumberRef = useRef(currentTrainNumber);
+
+  useEffect(() => {
+    if (currentTrainNumber && currentTrainNumber !== lastTrainNumberRef.current) {
+      lastTrainNumberRef.current = currentTrainNumber;
+      autoScrolledRef.current = false;
+    }
+  }, [currentTrainNumber]);
 
   const activeIndex = useMemo(() => {
     if (!running) return -1;
@@ -123,6 +134,26 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
     }
   }, [activeIndex, sections]);
 
+  // Requirements 7-10: Auto-scroll Route Timeline ONCE to live train position
+  // Does not re-scroll on subsequent 60s background polling updates
+  useEffect(() => {
+    if (!running || activeIndex < 0 || autoScrolledRef.current) return;
+
+    // Use requestAnimationFrame / timeout to ensure DOM layout has completed
+    const timer = setTimeout(() => {
+      if (autoScrolledRef.current || !scrollContainerRef.current) return;
+      const target =
+        scrollContainerRef.current.querySelector('.intermediate-item-row.is-current') ||
+        scrollContainerRef.current.querySelector('.is-active-segment');
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        autoScrolledRef.current = true;
+      }
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [running, activeIndex]);
+
   if (!sections.length) {
     return (
       <div className="route-empty-state">
@@ -162,7 +193,7 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
         </div>
       </div>
 
-      <div className="route-scroll-area">
+      <div ref={scrollContainerRef} className="route-scroll-area">
         {sections.map((section, i) => {
           const code = stationCode(section.main);
           const isOrigin = i === 0;
@@ -171,7 +202,13 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
           const open = Boolean(expanded[code]);
           const active = i === activeIndex;
           const isPassed = running && activeIndex >= 0 && i < activeIndex;
-          const isCurrentStation = running && (String(live.currentStationCode || '').toUpperCase() === code.toUpperCase() || (sequence > 0 && Number(section.main.sequence) === Number(sequence)));
+
+          // Section 14: Exactly ONE authoritative current train position/indicator
+          const locStatus = String(live.currentLocation?.status || live.status || '').toLowerCase();
+          const isStoppedAtThisStation = active && (locStatus === 'arrived' || locStatus === 'halted' || locStatus === 'at_station') && String(live.currentStationCode || '').toUpperCase() === code.toUpperCase();
+          const showDockedTrain = active && isStoppedAtThisStation;
+          const showMovingTrain = active && !showDockedTrain;
+
           const prog = active ? sectionProgress(section, live, sequence) : isPassed ? 1 : 0;
           const etaPred = getStationEtaPredictions(train, section.main);
           const halt = formatHalt(section.main.scheduledArrivalTime, section.main.scheduledDepartureTime);
@@ -212,13 +249,13 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
 
                 {/* Station Node on the Track (clickable) */}
                 <div
-                  className={`route-station-node ${isPassed ? 'node-passed' : ''} ${isCurrentStation ? 'node-current' : ''} ${active && !isCurrentStation ? 'node-active' : ''} ${section.intermediate.length > 0 ? 'cursor-pointer' : ''}`}
+                  className={`route-station-node ${isPassed ? 'node-passed' : ''} ${isStoppedAtThisStation ? 'node-current' : ''} ${active && !isStoppedAtThisStation ? 'node-active' : ''} ${section.intermediate.length > 0 ? 'cursor-pointer' : ''}`}
                   onClick={handleStationCardClick}
                   title={`${stationName(section.main)} (${code}) - Click to view details${section.intermediate.length > 0 ? ' and toggle intermediate stations' : ''}`}
                 >
                   {isPassed ? (
                     <Check size={11} strokeWidth={3} className="node-check-icon" />
-                  ) : isCurrentStation ? (
+                  ) : isStoppedAtThisStation ? (
                     <>
                       <span className="node-pulse-beacon" />
                       <span className="node-center-dot" />
@@ -228,8 +265,8 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
                   )}
                 </div>
 
-                {/* Live Train animation docked at station */}
-                {isCurrentStation && (
+                {/* Section 14: Render ONE train head at station if docked */}
+                {showDockedTrain && (
                   <div className="route-station-docked-train" title="Train currently at station">
                     <span className="docked-train-pulse" />
                     <div className="docked-train-icon">
@@ -238,8 +275,8 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
                   </div>
                 )}
 
-                {/* Live Train animation crossing along the active track segment */}
-                {active && !isCurrentStation && (
+                {/* Section 14: Render ONE train head on segment if moving (never simultaneously with docked) */}
+                {showMovingTrain && (
                   <div
                     className="route-live-train-marker"
                     style={{
@@ -261,7 +298,7 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
 
               {/* Right Column: Station Card with Vertically Stacked Scheduled vs ETA */}
               <div
-                className={`route-station-card ${isCurrentStation ? 'current-card' : ''} ${isPassed ? 'passed-card' : ''} ${section.intermediate.length > 0 ? 'has-intermediates' : ''} ${isFocused ? 'focused-card' : ''}`}
+                className={`route-station-card ${isStoppedAtThisStation ? 'current-card' : ''} ${isPassed ? 'passed-card' : ''} ${section.intermediate.length > 0 ? 'has-intermediates' : ''} ${isFocused ? 'focused-card' : ''}`}
                 onClick={handleStationCardClick}
                 style={{ cursor: 'pointer' }}
                 title="Click station to view ETA/delay at top and toggle intermediate stations"
@@ -292,7 +329,7 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
                   </div>
 
                   <div className="station-status-indicator">
-                    {isCurrentStation ? (
+                    {isStoppedAtThisStation ? (
                       <span className="status-badge current">
                         <span className="live-pulsing-dot" /> At Station
                       </span>
@@ -329,17 +366,15 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
 
                         {/* Line 2 (BELOW): ETA Arrival with Delay Badge */}
                         <div className="eta-stack-section expected-section">
-                          <span className="stack-caption">ETA Arrival:</span>
+                          <span className="stack-caption">{isPassed ? 'Actual Arrival:' : 'ETA Arrival:'}</span>
                           <strong className={`stack-time eta-time ${etaPred.arrivalTone}`}>
-                            {etaPred.arrivalEta ? formatTimeOnly(etaPred.arrivalEta, timeFormat) : '—'}
+                            {(running || isPassed) && etaPred.arrivalEta ? formatTimeOnly(etaPred.arrivalEta, timeFormat) : '...'}
                           </strong>
-                          <span className={`delay-badge ${etaPred.arrivalTone}`}>
-                            {etaPred.delayLabel || (etaPred.arrivalTone === 'on-time'
-                              ? 'On time'
-                              : etaPred.delayMinutes > 0
-                              ? `+${etaPred.delayMinutes}m late`
-                              : `${Math.abs(etaPred.delayMinutes)}m early`)}
-                          </span>
+                          {(running || isPassed) && (etaPred.arrivalDelayLabel || etaPred.delayLabel) && (etaPred.arrivalDelayLabel || etaPred.delayLabel) !== '...' && (
+                            <span className={`delay-badge ${etaPred.arrivalTone}`}>
+                              {etaPred.arrivalDelayLabel || etaPred.delayLabel}
+                            </span>
+                          )}
                         </div>
                       </div>
                     )}
@@ -366,17 +401,15 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
 
                         {/* Line 2 (BELOW): ETA Departure with Delay Badge */}
                         <div className="eta-stack-section expected-section">
-                          <span className="stack-caption">ETA Departure:</span>
+                          <span className="stack-caption">{isPassed ? 'Actual Departure:' : 'ETA Departure:'}</span>
                           <strong className={`stack-time eta-time ${etaPred.departureTone}`}>
-                            {etaPred.departureEta ? formatTimeOnly(etaPred.departureEta, timeFormat) : '—'}
+                            {(running || isPassed) && etaPred.departureEta ? formatTimeOnly(etaPred.departureEta, timeFormat) : '...'}
                           </strong>
-                          <span className={`delay-badge ${etaPred.departureTone}`}>
-                            {etaPred.departureTone === 'on-time'
-                              ? 'On time'
-                              : etaPred.delayMinutes > 0
-                              ? `+${etaPred.delayMinutes}m late`
-                              : `${Math.abs(etaPred.delayMinutes)}m early`}
-                          </span>
+                          {(running || isPassed) && (etaPred.departureDelayLabel || etaPred.delayLabel) && (etaPred.departureDelayLabel || etaPred.delayLabel) !== '...' && (
+                            <span className={`delay-badge ${etaPred.departureTone}`}>
+                              {etaPred.departureDelayLabel || etaPred.delayLabel}
+                            </span>
+                          )}
                         </div>
                       </div>
                     )}
@@ -403,10 +436,10 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
                       <div className="intermediate-list">
                         {section.intermediate.map((mid) => {
                           const mcode = stationCode(mid);
-                          const midEta = getStationEtaPredictions(train, mid);
                           const midCurrent = running && (Number(mid.sequence) === Number(sequence) || String(live.currentStationCode || '').toUpperCase() === mcode.toUpperCase());
                           const midPassed = running && ((sequence > 0 && Number(mid.sequence) < Number(sequence)) || isPassed);
                           const isMidFocused = focusedStationCode && String(focusedStationCode).toUpperCase() === mcode.toUpperCase();
+                          const actualTime = mid.actualArrivalTime || mid.actualDepartureTime || mid.actualArrival || mid.actualDeparture;
 
                           return (
                             <div
@@ -443,18 +476,13 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
                                     {formatTimeOnly(mid.scheduledArrivalTime || mid.scheduledDepartureTime, timeFormat)}
                                   </span>
                                 </div>
-                                {(midEta.arrivalEta || midEta.departureEta) && (
+                                {midPassed && actualTime && (
                                   <div className="intermediate-time-col">
-                                    <span className="intermediate-caption">ETA:</span>
-                                    <span className={`intermediate-eta ${midEta.arrivalTone}`}>
-                                      {formatTimeOnly(midEta.arrivalEta || midEta.departureEta, timeFormat)}
+                                    <span className="intermediate-caption">Actual:</span>
+                                    <span className="intermediate-sched font-medium text-[#15383d]">
+                                      {formatTimeOnly(actualTime, timeFormat)}
                                     </span>
                                   </div>
-                                )}
-                                {midEta.delayMinutes !== 0 && (
-                                  <span className={`intermediate-delay-pill ${midEta.arrivalTone}`}>
-                                    {midEta.delayLabel}
-                                  </span>
                                 )}
                               </div>
                             </div>

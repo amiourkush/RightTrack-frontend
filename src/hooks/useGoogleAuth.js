@@ -13,6 +13,7 @@ export function useGoogleAuth({ onCredential }) {
   const [available, setAvailable] = useState(true);
   const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!clientId) { setAvailable(false); return; }
     let cancelled = false;
     loadScript().then((google) => {
