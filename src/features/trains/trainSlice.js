@@ -1,15 +1,15 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import {
-  getLiveStatus, getLiveStatusShort, getLocation, getTrainDetails, getTrainEta,
+  getPreferredLiveStatus, getTrainDetails, getTrainEta,
   getTrainRoute, getStationEta, getTrainsBetween, refreshTrain,
-  searchTrainsGet, searchTrainsPost, getLiveEtaML,
+  searchTrainsGet, searchTrainsPost,
 } from '../../services/api/trainApi';
 import { normalizeEta, normalizeLive, normalizeSearchResult } from '../../utils/train';
 import {
   bustLiveCache,
-  getCachedBundle,
   getCachedLive,
   getCachedSearch,
+  getCachedStatic,
   isLiveFresh,
   setCachedLive,
   setCachedSearch,
@@ -67,22 +67,25 @@ export const searchTrains = createAsyncThunk('trains/search', async (query, { re
 // Fetch Train Bundle – static (24h) + live (2min)
 // ─────────────────────────────────────────────────────────
 export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ trainNumber, journeyDate }, { rejectWithValue }) => {
+  const key = String(trainNumber);
+
   // 1. Serve static data (details + route) from cache if available
-  const cached = getCachedBundle(String(trainNumber));
-  if (cached?.details && cached?.route) {
-    // Static data is fresh – only fetch live status separately
-    const livePromises = await Promise.allSettled([
-      isLiveFresh(trainNumber) ? Promise.resolve({ data: getCachedLive(trainNumber) }) : getLiveStatusShort(trainNumber, journeyDate),
+  const cachedStatic = getCachedStatic(key);
+  if (cachedStatic?.details && cachedStatic?.route) {
+    // Static data is fresh in cache – only fetch live status & ETA
+    const liveFresh = isLiveFresh(key, journeyDate);
+    const [liveRes, etaRes] = await Promise.allSettled([
+      liveFresh ? Promise.resolve({ data: getCachedLive(key, journeyDate)?.live || getCachedLive(key, journeyDate) }) : getPreferredLiveStatus(trainNumber, journeyDate),
       getTrainEta(trainNumber, journeyDate),
-      getLiveEtaML(trainNumber),
     ]);
 
-    const liveRaw  = livePromises[0].status === 'fulfilled' ? livePromises[0].value?.data : null;
-    const etaRaw   = livePromises[1].status === 'fulfilled' ? livePromises[1].value?.data : null;
-    const mlEta    = livePromises[2].status === 'fulfilled' ? livePromises[2].value?.data : null;
+    const liveRaw = liveRes.status === 'fulfilled' ? liveRes.value?.data : null;
+    const etaRaw  = etaRes.status === 'fulfilled' ? etaRes.value?.data : null;
 
-    const live  = liveRaw ? normalizeLive(liveRaw) : null;
-    const eta   = etaRaw ? normalizeEta(etaRaw) : null;
+    const live = liveRaw ? normalizeLive(liveRaw) : null;
+    const activeDate = live?.journeyDate || journeyDate;
+    const eta  = etaRaw  ? normalizeEta(etaRaw)   : null;
+
     const stationEtasMap = {};
     if (Array.isArray(eta?.stationEtas)) {
       eta.stationEtas.forEach((s) => {
@@ -91,34 +94,40 @@ export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ 
       });
     }
 
-    // Persist fresh live data
-    if (live) setCachedLive(trainNumber, { live, ...(eta ? { eta } : {}), ...(mlEta ? { mlEta } : {}), ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}) });
+    // Persist fresh live data to date-scoped live cache
+    if (live) {
+      setCachedLive(key, activeDate, {
+        live,
+        ...(eta ? { eta } : {}),
+        ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
+        journeyDate: activeDate,
+        liveLastUpdated: Date.now(),
+      });
+    }
 
     return {
-      trainNumber: String(trainNumber),
-      journeyDate,
-      details:   cached.details,
-      route:     cached.route,
-      ...(live  ? { live }  : {}),
-      ...(eta   ? { eta }   : {}),
-      ...(mlEta ? { mlEta } : {}),
+      trainNumber: key,
+      journeyDate: activeDate,
+      details: cachedStatic.details,
+      route:   cachedStatic.route,
+      ...(live ? { live } : {}),
+      ...(eta  ? { eta }  : {}),
       ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
     };
   }
 
-  // 2. Full network fetch (first ever load for this train)
+  // 2. Full network fetch (first ever load for this train when static cache is missing)
   const results = await Promise.allSettled([
     getTrainDetails(trainNumber),
     getTrainRoute(trainNumber),
-    getLiveStatusShort(trainNumber, journeyDate),
+    getPreferredLiveStatus(trainNumber, journeyDate),
     getTrainEta(trainNumber, journeyDate),
-    getLiveEtaML(trainNumber),
   ]);
+
   const detailsRaw = results[0].status === 'fulfilled' ? results[0].value.data : null;
   const routeRaw   = results[1].status === 'fulfilled' ? results[1].value.data : null;
   const liveRaw    = results[2].status === 'fulfilled' ? results[2].value.data : null;
   const etaRaw     = results[3].status === 'fulfilled' ? results[3].value.data : null;
-  const mlEta      = results[4].status === 'fulfilled' ? results[4].value.data : null;
 
   const details = rootData(detailsRaw);
   const route   = rootData(routeRaw);
@@ -126,7 +135,9 @@ export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ 
   if (!details && !route) return rejectWithValue('No train data is available.');
 
   const live = liveRaw ? normalizeLive(liveRaw) : null;
+  const activeDate = live?.journeyDate || journeyDate;
   const eta  = etaRaw  ? normalizeEta(etaRaw)   : null;
+
   const stationEtasMap = {};
   if (Array.isArray(eta?.stationEtas)) {
     eta.stationEtas.forEach((s) => {
@@ -136,19 +147,26 @@ export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ 
   }
 
   const bundle = {
-    trainNumber: String(trainNumber),
-    journeyDate,
+    trainNumber: key,
+    journeyDate: activeDate,
     details,
     route,
-    ...(live  ? { live }  : {}),
-    ...(eta   ? { eta }   : {}),
-    ...(mlEta ? { mlEta } : {}),
+    ...(live ? { live } : {}),
+    ...(eta  ? { eta }  : {}),
     ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
   };
 
-  // Cache static tier (24h) and live tier (2min) separately
-  setCachedStatic(trainNumber, bundle);
-  if (live) setCachedLive(trainNumber, { live, ...(eta ? { eta } : {}), ...(mlEta ? { mlEta } : {}), ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}) });
+  // Cache static tier (24h) and live tier (2min, date-scoped) separately
+  setCachedStatic(key, bundle);
+  if (live) {
+    setCachedLive(key, activeDate, {
+      live,
+      ...(eta ? { eta } : {}),
+      ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
+      journeyDate: activeDate,
+      liveLastUpdated: Date.now(),
+    });
+  }
 
   return bundle;
 });
@@ -158,28 +176,30 @@ export const fetchTrainBundle = createAsyncThunk('trains/fetchBundle', async ({ 
 // ─────────────────────────────────────────────────────────
 export const hydrateTrainSummary = createAsyncThunk('trains/hydrateSummary', async ({ trainNumber, journeyDate }, { rejectWithValue }) => {
   try {
-    const cached = getCachedBundle(String(trainNumber));
-    const hasStatic = cached?.details && cached?.route;
-    const hasLive   = isLiveFresh(trainNumber);
+    const key = String(trainNumber);
+    const cachedStatic = getCachedStatic(key);
+    const cachedLive   = getCachedLive(key, journeyDate);
+    const hasStatic    = cachedStatic?.details && cachedStatic?.route;
+    const hasLive      = isLiveFresh(key, journeyDate);
 
     const promises = await Promise.allSettled([
-      hasStatic ? Promise.resolve({ data: cached.details }) : getTrainDetails(trainNumber),
-      hasStatic ? Promise.resolve({ data: cached.route })   : getTrainRoute(trainNumber),
-      hasLive   ? Promise.resolve({ data: getCachedLive(trainNumber)?.live || cached?.live }) : getLiveStatusShort(trainNumber, journeyDate),
-      getLiveEtaML(trainNumber),
+      hasStatic ? Promise.resolve({ data: cachedStatic.details }) : getTrainDetails(trainNumber),
+      hasStatic ? Promise.resolve({ data: cachedStatic.route })   : getTrainRoute(trainNumber),
+      hasLive   ? Promise.resolve({ data: cachedLive?.live || cachedLive }) : getPreferredLiveStatus(trainNumber, journeyDate),
       getTrainEta(trainNumber, journeyDate),
     ]);
 
     const detailsRaw = promises[0].status === 'fulfilled' ? promises[0].value.data : null;
     const routeRaw   = promises[1].status === 'fulfilled' ? promises[1].value.data : null;
     const liveRaw    = promises[2].status === 'fulfilled' ? promises[2].value.data : null;
-    const mlEta      = promises[3].status === 'fulfilled' ? promises[3].value.data : null;
-    const etaRaw     = promises[4].status === 'fulfilled' ? promises[4].value.data : null;
+    const etaRaw     = promises[3].status === 'fulfilled' ? promises[3].value.data : null;
 
     const details = rootData(detailsRaw);
     const route   = rootData(routeRaw);
     const live = liveRaw ? normalizeLive(liveRaw) : null;
+    const activeDate = live?.journeyDate || journeyDate;
     const eta  = etaRaw  ? normalizeEta(etaRaw)   : null;
+
     const stationEtasMap = {};
     if (Array.isArray(eta?.stationEtas)) {
       eta.stationEtas.forEach((s) => {
@@ -189,18 +209,25 @@ export const hydrateTrainSummary = createAsyncThunk('trains/hydrateSummary', asy
     }
 
     const bundle = {
-      trainNumber: String(trainNumber),
-      journeyDate,
+      trainNumber: key,
+      journeyDate: activeDate,
       ...(details ? { details } : {}),
       ...(route   ? { route }   : {}),
       ...(live    ? { live }    : {}),
-      ...(mlEta   ? { mlEta }   : {}),
       ...(eta     ? { eta }     : {}),
       ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
     };
 
-    setCachedStatic(trainNumber, bundle);
-    if (live) setCachedLive(trainNumber, { live, ...(eta ? { eta } : {}), ...(mlEta ? { mlEta } : {}), ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}) });
+    if (details || route) setCachedStatic(key, bundle);
+    if (live) {
+      setCachedLive(key, activeDate, {
+        live,
+        ...(eta ? { eta } : {}),
+        ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
+        journeyDate: activeDate,
+        liveLastUpdated: Date.now(),
+      });
+    }
 
     return bundle;
   } catch (error) {
@@ -208,39 +235,30 @@ export const hydrateTrainSummary = createAsyncThunk('trains/hydrateSummary', asy
   }
 });
 
-
 // ─────────────────────────────────────────────────────────
-// Poll Train Live – strictly live telemetry (location, live status, ETA) in parallel
+// Poll Train Live – strictly live telemetry (preferred live + ETA) in parallel
 // ─────────────────────────────────────────────────────────
 export const pollTrainLive = createAsyncThunk('trains/pollLive', async ({ trainNumber, journeyDate }, { dispatch, rejectWithValue }) => {
   const key = String(trainNumber);
 
-  // Poll only live telemetry: live status, GPS location, ETA, and ML ETA concurrently
-  const [liveRes, shortRes, etaRes, locRes, mlRes] = await Promise.allSettled([
-    getLiveStatus(trainNumber, journeyDate),
-    getLiveStatusShort(trainNumber, journeyDate),
+  // Poll only live telemetry: preferred live status (RailRadar with backend fallback) and ETA in parallel
+  const [liveRes, etaRes] = await Promise.allSettled([
+    getPreferredLiveStatus(trainNumber, journeyDate),
     getTrainEta(trainNumber, journeyDate),
-    getLocation(trainNumber, journeyDate),
-    getLiveEtaML(trainNumber),
   ]);
 
   const liveRaw = liveRes.status === 'fulfilled' && liveRes.value?.data
     ? liveRes.value.data
-    : shortRes.status === 'fulfilled' && shortRes.value?.data
-    ? shortRes.value.data
     : null;
 
-  if (!liveRaw && etaRes.status !== 'fulfilled' && locRes.status !== 'fulfilled' && mlRes.status !== 'fulfilled') {
+  if (!liveRaw && etaRes.status !== 'fulfilled') {
     const err = liveRes.status === 'rejected' ? liveRes.reason : null;
     return rejectWithValue(err?.response?.data?.message || err?.message || 'Live status unavailable');
   }
 
   const liveData = liveRaw ? normalizeLive(liveRaw) : null;
   const activeDate = liveData?.journeyDate || journeyDate;
-
   const etaPayload = etaRes.status === 'fulfilled' ? normalizeEta(etaRes.value?.data) : null;
-  const locPayload = locRes.status === 'fulfilled' ? locRes.value?.data : null;
-  const mlEtaPayload = mlRes.status === 'fulfilled' ? mlRes.value?.data : null;
 
   const stationEtasMap = {};
   if (Array.isArray(etaPayload?.stationEtas)) {
@@ -254,8 +272,6 @@ export const pollTrainLive = createAsyncThunk('trains/pollLive', async ({ trainN
     trainNumber: key,
     ...(liveData ? { live: liveData } : {}),
     ...(etaPayload ? { eta: etaPayload } : {}),
-    ...(locPayload ? { location: locPayload } : {}),
-    ...(mlEtaPayload ? { mlEta: mlEtaPayload } : {}),
     ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
     journeyDate: activeDate,
     lastUpdated: Date.now(),
@@ -263,12 +279,11 @@ export const pollTrainLive = createAsyncThunk('trains/pollLive', async ({ trainN
 
   dispatch(mergeLiveTelemetry(telemetry));
 
-  // Persist fresh live data to 2min cache for fast re-open
+  // Persist fresh live data to date-scoped 2min cache for fast re-open
   if (liveData) {
-    setCachedLive(trainNumber, {
+    setCachedLive(key, activeDate, {
       live: liveData,
       ...(etaPayload ? { eta: etaPayload } : {}),
-      ...(mlEtaPayload ? { mlEta: mlEtaPayload } : {}),
       ...(Object.keys(stationEtasMap).length > 0 ? { stationEtas: stationEtasMap } : {}),
       journeyDate: activeDate,
       liveLastUpdated: Date.now(),

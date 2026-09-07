@@ -102,24 +102,86 @@ export function unwrapData(payload) {
 export function normalizeLive(payload) {
   const root = unwrapData(payload) || {};
   const current = root.currentLocation || {};
+  const prevHalt = root.previousHalt || {};
+  const nextHalt = root.nextHalt || {};
   const flat = { ...root };
-  if (!flat.journeyDate) flat.journeyDate = root.startDate || root.currentLocation?.journeyDate || null;
+
+  if (!flat.trainNumber) flat.trainNumber = root.trainNumber || null;
+  if (!flat.trainName) flat.trainName = root.trainName || null;
+  if (!flat.journeyDate) flat.journeyDate = root.startDate || root.journeyDate || current.startDate || current.journeyDate || null;
   if (!flat.status && current.status) flat.status = current.status;
-  if (flat.delayMinutes == null && current.delayMinutes != null) flat.delayMinutes = current.delayMinutes;
-  if (flat.currentStationCode == null) flat.currentStationCode = current.stationCode || current.currentStationCode || null;
-  if (flat.currentStationName == null) flat.currentStationName = current.stationName || current.currentStationName || null;
-  if (flat.currentSequence == null) flat.currentSequence = current.sequence || current.currentSequence || null;
-  if (flat.previousHaltCode == null) flat.previousHaltCode = root.previousHaltCode || root.previousStationCode || current.previousHaltCode || current.previousStationCode || null;
-  if (flat.nextHaltCode == null) flat.nextHaltCode = root.nextHaltCode || root.nextStationCode || current.nextHaltCode || current.nextStationCode || null;
-  if (flat.segmentProgress == null) flat.segmentProgress = current.segmentProgress;
-  if (flat.speedKmh == null) flat.speedKmh = current.speedKmh;
-  if (flat.bearingDegrees == null) flat.bearingDegrees = current.bearingDegrees;
-  if (flat.lastUpdatedAt == null) flat.lastUpdatedAt = root.lastUpdatedAt || null;
-  if (flat.dataFreshnessSeconds == null) flat.dataFreshnessSeconds = root.dataFreshnessSeconds ?? null;
-  if (flat.distanceFromOriginKm == null) flat.distanceFromOriginKm = current.distanceFromOriginKm;
-  if (flat.locationAvailable == null) flat.locationAvailable = current.latitude != null && current.longitude != null;
-  if (flat.latitude == null) flat.latitude = current.latitude;
-  if (flat.longitude == null) flat.longitude = current.longitude;
+  if (flat.delayMinutes == null) {
+    flat.delayMinutes = current.delayMinutes != null ? current.delayMinutes : (root.delayMinutes ?? null);
+  }
+
+  if (flat.currentStationCode == null) {
+    flat.currentStationCode = current.stationCode || current.currentStationCode || root.currentStationCode || null;
+  }
+  if (flat.currentStationName == null) {
+    flat.currentStationName = current.stationName || current.currentStationName || root.currentStationName || null;
+  }
+  if (flat.currentSequence == null) {
+    flat.currentSequence = current.sequence != null ? current.sequence : (root.currentSequence ?? null);
+  }
+
+  const prevCode = prevHalt.stationCode || prevHalt.code || root.previousHaltCode || root.previousStationCode || current.previousHaltCode || current.previousStationCode || null;
+  const nextCode = nextHalt.stationCode || nextHalt.code || root.nextHaltCode || root.nextStationCode || current.nextHaltCode || current.nextStationCode || null;
+
+  if (flat.previousHaltCode == null) flat.previousHaltCode = prevCode;
+  if (flat.nextHaltCode == null) flat.nextHaltCode = nextCode;
+
+  if (root.previousHalt) {
+    flat.previousHalt = {
+      stationCode: prevHalt.stationCode || prevHalt.code || prevCode,
+      stationName: prevHalt.stationName || prevHalt.name || null,
+      sequence: prevHalt.sequence != null ? Number(prevHalt.sequence) : null,
+      distance: prevHalt.distance != null ? Number(prevHalt.distance) : null,
+    };
+  }
+  if (root.nextHalt) {
+    flat.nextHalt = {
+      stationCode: nextHalt.stationCode || nextHalt.code || nextCode,
+      stationName: nextHalt.stationName || nextHalt.name || null,
+      sequence: nextHalt.sequence != null ? Number(nextHalt.sequence) : null,
+      distance: nextHalt.distance != null ? Number(nextHalt.distance) : null,
+    };
+  }
+
+  if (flat.segmentProgress == null) {
+    flat.segmentProgress = current.segmentProgress != null ? current.segmentProgress : (root.segmentProgress ?? null);
+  }
+  if (flat.speedKmh == null) {
+    flat.speedKmh = current.speedKmh != null ? current.speedKmh : (root.speedKmh ?? null);
+  }
+  if (flat.bearingDegrees == null) {
+    flat.bearingDegrees = current.bearingDegrees != null ? current.bearingDegrees : (root.bearingDegrees ?? null);
+  }
+  if (flat.lastUpdatedAt == null) {
+    flat.lastUpdatedAt = root.lastUpdatedAt || current.lastUpdatedAt || root.updatedAt || null;
+  }
+  if (flat.dataFreshnessSeconds == null) {
+    flat.dataFreshnessSeconds = root.dataFreshnessSeconds ?? current.dataFreshnessSeconds ?? null;
+  }
+  if (flat.distanceFromOriginKm == null) {
+    flat.distanceFromOriginKm = current.distanceFromOriginKm != null ? current.distanceFromOriginKm : (root.distanceFromOriginKm ?? null);
+  }
+  if (flat.distanceFromLastStationKm == null) {
+    flat.distanceFromLastStationKm = current.distanceFromLastStationKm != null ? current.distanceFromLastStationKm : (root.distanceFromLastStationKm ?? null);
+  }
+
+  if (flat.isLive == null) flat.isLive = root.isLive ?? null;
+  if (flat.trackingMode == null) flat.trackingMode = root.trackingMode ?? current.trackingMode ?? null;
+  if (flat.positionSource == null) flat.positionSource = current.positionSource || root.positionSource || null;
+  if (flat.confidenceLevel == null) flat.confidenceLevel = root.confidenceLevel ?? current.confidenceLevel ?? null;
+
+  const lat = current.latitude != null ? current.latitude : (root.latitude ?? null);
+  const lng = current.longitude != null ? current.longitude : (root.longitude ?? null);
+  flat.latitude = lat;
+  flat.longitude = lng;
+  if (flat.locationAvailable == null) {
+    flat.locationAvailable = (lat != null && lng != null && lat !== 0 && lng !== 0);
+  }
+
   return flat;
 }
 
@@ -893,22 +955,120 @@ export function getCurrentPositionTarget(train) {
   if (/NOT[_ -]?START|SCHEDULED|UPCOMING|YET/.test(status)) return { position: null, source: 'not-started' };
   if (/CANCEL/.test(status)) return { position: null, source: 'cancelled' };
   if (/COMPLET|TERMINAT/.test(status)) return { position: null, source: 'completed' };
+
+  // 1. Direct GPS
   const lat = Number(location.latitude ?? live.latitude);
   const lng = Number(location.longitude ?? live.longitude);
-  if (Number.isFinite(lat) && Number.isFinite(lng) && (location.locationAvailable !== false || live.locationAvailable !== false)) return { position: [lat, lng], source: 'gps' };
+  if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0 && (location.locationAvailable !== false || live.locationAvailable !== false)) {
+    return { position: [lat, lng], source: 'gps' };
+  }
+
   const stops = getMergedRouteStops(train);
-  const sequence = Number(live.currentSequence ?? location.currentSequence ?? 0);
-  const progress = Math.max(0, Math.min(1, Number(live.segmentProgress ?? location.segmentProgress) || 0));
-  const current = stops.find((s) => Number(s.sequence) === sequence);
-  const next = stops.find((s) => Number(s.sequence) === sequence + 1);
+  if (!stops.length) return { position: null, source: 'unavailable' };
+
   const coords = (s) => {
-    const a = Number(s?.latitude); const b = Number(s?.longitude);
+    const a = Number(s?.latitude ?? s?.lat);
+    const b = Number(s?.longitude ?? s?.lng);
     return Number.isFinite(a) && Number.isFinite(b) ? [a, b] : null;
   };
-  const a = coords(current); const b = coords(next);
-  if (a && b) return { position: [a[0] + (b[0]-a[0])*progress, a[1] + (b[1]-a[1])*progress], source:'station-segment' };
-  if (a) return { position:a, source:'current-station' };
-  return { position:null, source:'unavailable' };
+
+  // 2. RailRadar segment progress (previousHalt + nextHalt)
+  const prevCode = String(live.previousHalt?.stationCode || live.previousHaltCode || location.previousHaltCode || '').toUpperCase();
+  const nextCode = String(live.nextHalt?.stationCode || live.nextHaltCode || location.nextHaltCode || '').toUpperCase();
+  const rawProgress = Number(live.segmentProgress ?? location.segmentProgress);
+  const progress = Number.isFinite(rawProgress) && rawProgress >= 0 && rawProgress <= 1
+    ? rawProgress
+    : (Number.isFinite(rawProgress) && rawProgress > 0 ? Math.max(0.01, Math.min(0.99, rawProgress)) : null);
+
+  if (prevCode && nextCode && prevCode !== nextCode && progress != null) {
+    const prev = stops.find((s) => stationCode(s).toUpperCase() === prevCode);
+    const next = stops.find((s) => stationCode(s).toUpperCase() === nextCode);
+    const a = coords(prev);
+    const b = coords(next);
+    if (a && b) {
+      return { position: [a[0] + (b[0] - a[0]) * progress, a[1] + (b[1] - a[1]) * progress], source: 'railradar-segment' };
+    }
+  }
+
+  // 3. RailRadar distanceFromOriginKm
+  const distFromOrigin = Number(live.distanceFromOriginKm ?? location.distanceFromOriginKm);
+  if (Number.isFinite(distFromOrigin) && distFromOrigin > 0) {
+    let pStop = null;
+    let nStop = null;
+    for (let i = 0; i < stops.length; i++) {
+      const s = stops[i];
+      const d = Number(s.distanceKm);
+      const c = coords(s);
+      if (c && Number.isFinite(d)) {
+        if (d <= distFromOrigin) {
+          pStop = { coords: c, dist: d };
+        } else if (d > distFromOrigin && !nStop) {
+          nStop = { coords: c, dist: d };
+          break;
+        }
+      }
+    }
+    if (pStop && nStop && nStop.dist > pStop.dist) {
+      const frac = Math.max(0, Math.min(1, (distFromOrigin - pStop.dist) / (nStop.dist - pStop.dist)));
+      return {
+        position: [pStop.coords[0] + (nStop.coords[0] - pStop.coords[0]) * frac, pStop.coords[1] + (nStop.coords[1] - pStop.coords[1]) * frac],
+        source: 'railradar-distance',
+      };
+    }
+    if (pStop) return { position: pStop.coords, source: 'railradar-distance' };
+  }
+
+  // 4. Distance covered
+  const coveredDist = getDistanceCovered(train);
+  if (coveredDist != null && coveredDist >= 0) {
+    let pStop = null;
+    let nStop = null;
+    for (let i = 0; i < stops.length; i++) {
+      const s = stops[i];
+      const d = Number(s.distanceKm);
+      const c = coords(s);
+      if (c && Number.isFinite(d)) {
+        if (d <= coveredDist) {
+          pStop = { coords: c, dist: d };
+        } else if (d > coveredDist && !nStop) {
+          nStop = { coords: c, dist: d };
+          break;
+        }
+      }
+    }
+    if (pStop && nStop && nStop.dist > pStop.dist) {
+      const frac = Math.max(0, Math.min(1, (coveredDist - pStop.dist) / (nStop.dist - pStop.dist)));
+      return {
+        position: [pStop.coords[0] + (nStop.coords[0] - pStop.coords[0]) * frac, pStop.coords[1] + (nStop.coords[1] - pStop.coords[1]) * frac],
+        source: 'distance-covered',
+      };
+    }
+    if (pStop) return { position: pStop.coords, source: 'distance-covered' };
+  }
+
+  // 5. Sequence interpolation
+  const sequence = Number(live.currentSequence ?? location.currentSequence ?? 0);
+  if (sequence > 0) {
+    const current = stops.find((s) => Number(s.sequence) === sequence);
+    const next = stops.find((s) => Number(s.sequence) === sequence + 1);
+    const a = coords(current);
+    const b = coords(next);
+    if (a && b) {
+      const frac = progress != null ? progress : 0.5;
+      return { position: [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac], source: 'station-segment' };
+    }
+    if (a) return { position: a, source: 'current-station' };
+  }
+
+  // 6. Current station match
+  const curCode = String(live.currentStationCode || location.currentStationCode || '').toUpperCase();
+  if (curCode) {
+    const cur = stops.find((s) => stationCode(s).toUpperCase() === curCode);
+    const c = coords(cur);
+    if (c) return { position: c, source: 'current-station' };
+  }
+
+  return { position: null, source: 'unavailable' };
 }
 
 export function buildRoutePoints(route) {

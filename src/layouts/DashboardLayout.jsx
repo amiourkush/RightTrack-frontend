@@ -21,7 +21,7 @@ export default function DashboardLayout() {
       <Sidebar />
       <section className="ml-[210px] flex h-screen min-w-0 flex-col max-[900px]:ml-0">
         <Topbar title={title(pathname)} />
-        <main className="min-h-0 flex-1 overflow-hidden px-7 pb-3 pt-1 max-[1100px]:px-5 max-[900px]:overflow-auto max-[640px]:px-4">
+        <main className="min-h-0 flex-1 overflow-y-auto px-7 pb-8 pt-3 max-[1100px]:px-5 max-[640px]:px-4">
           <Outlet />
         </main>
       </section>

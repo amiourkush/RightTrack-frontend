@@ -1,4 +1,4 @@
-import { ArrowRight, Check, ChevronDown, ChevronRight, Clock, MapPin, TrainFront } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, TrainFront } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
   formatTimeOnly,
@@ -116,7 +116,10 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
   useEffect(() => {
     if (activeIndex >= 0 && sections[activeIndex]) {
       const c = stationCode(sections[activeIndex].main);
-      setExpanded((x) => ({ ...x, [c]: true }));
+      if (c) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setExpanded((x) => (x[c] ? x : { ...x, [c]: true }));
+      }
     }
   }, [activeIndex, sections]);
 
@@ -250,7 +253,7 @@ export default function RouteTimeline({ train, timeFormat = 'H24', onSelectStati
                       <TrainFront size={13} strokeWidth={2.5} />
                     </div>
                     <div className="train-crossing-tag">
-                      <span>{live.speedKmh ? `⚡ ${Math.round(live.speedKmh)} km/h` : '⚡ Running'}</span>
+                      <span>⚡ Running</span>
                     </div>
                   </div>
                 )}

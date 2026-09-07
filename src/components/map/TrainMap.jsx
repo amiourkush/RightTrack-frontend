@@ -113,34 +113,58 @@ function resolveTrainPosition(train, stops) {
   // 1. Direct GPS coordinates from live or location telemetry
   const gpsLat = Number(location.latitude ?? live.latitude);
   const gpsLng = Number(location.longitude ?? live.longitude);
-  if (Number.isFinite(gpsLat) && Number.isFinite(gpsLng) && gpsLat !== 0 && gpsLng !== 0) {
+  if (Number.isFinite(gpsLat) && Number.isFinite(gpsLng) && gpsLat !== 0 && gpsLng !== 0 && (location.locationAvailable !== false || live.locationAvailable !== false)) {
     return [gpsLat, gpsLng];
   }
 
-  // 2. Interpolate using previous & next halt codes
-  const prevCode = String(live.previousHaltCode || location.previousHaltCode || '').toUpperCase();
-  const nextCode = String(live.nextHaltCode     || location.nextHaltCode     || '').toUpperCase();
+  // 2. RailRadar / telemetry segmentProgress with previousHalt + nextHalt
+  const prevCode = String(live.previousHalt?.stationCode || live.previousHaltCode || location.previousHaltCode || '').toUpperCase();
+  const nextCode = String(live.nextHalt?.stationCode || live.nextHaltCode || location.nextHaltCode || '').toUpperCase();
   const rawProgress = Number(live.segmentProgress ?? location.segmentProgress);
-  const progress = Number.isFinite(rawProgress) && rawProgress > 0 ? Math.max(0.05, Math.min(0.95, rawProgress)) : 0.5;
+  const progress = Number.isFinite(rawProgress) && rawProgress >= 0 && rawProgress <= 1
+    ? rawProgress
+    : (Number.isFinite(rawProgress) && rawProgress > 0 ? Math.max(0.01, Math.min(0.99, rawProgress)) : null);
 
-  if (prevCode && nextCode && prevCode !== nextCode) {
+  if (prevCode && nextCode && prevCode !== nextCode && progress != null) {
     const prev = stops.find((s) => stationCode(s).toUpperCase() === prevCode);
     const next = stops.find((s) => stationCode(s).toUpperCase() === nextCode);
     const a = prev ? resolveStopCoords(prev) : getStationCoords(prevCode);
     const b = next ? resolveStopCoords(next) : getStationCoords(nextCode);
-    if (a && b) return [a.lat + (b.lat - a.lat) * progress, a.lng + (b.lng - a.lng) * progress];
+    if (a && b) {
+      return [a.lat + (b.lat - a.lat) * progress, a.lng + (b.lng - a.lng) * progress];
+    }
     if (a) return [a.lat, a.lng];
   }
 
-  // 3. Current station exact coordinate match
-  const curCode = String(live.currentStationCode || location.currentStationCode || '').toUpperCase();
-  if (curCode) {
-    const cur = stops.find((s) => stationCode(s).toUpperCase() === curCode);
-    const c = cur ? resolveStopCoords(cur) : getStationCoords(curCode);
-    if (c) return [c.lat, c.lng];
+  // 3. RailRadar / telemetry distanceFromOriginKm interpolation
+  const distFromOrigin = Number(live.distanceFromOriginKm ?? location.distanceFromOriginKm);
+  if (Number.isFinite(distFromOrigin) && distFromOrigin > 0) {
+    let pStop = null;
+    let nStop = null;
+    for (let i = 0; i < stops.length; i++) {
+      const s = stops[i];
+      const d = Number(s.distanceKm);
+      const coords = resolveStopCoords(s);
+      if (coords && Number.isFinite(d)) {
+        if (d <= distFromOrigin) {
+          pStop = { stop: s, coords, dist: d };
+        } else if (d > distFromOrigin && !nStop) {
+          nStop = { stop: s, coords, dist: d };
+          break;
+        }
+      }
+    }
+    if (pStop && nStop && nStop.dist > pStop.dist) {
+      const frac = Math.max(0, Math.min(1, (distFromOrigin - pStop.dist) / (nStop.dist - pStop.dist)));
+      return [
+        pStop.coords.lat + (nStop.coords.lat - pStop.coords.lat) * frac,
+        pStop.coords.lng + (nStop.coords.lng - pStop.coords.lng) * frac,
+      ];
+    }
+    if (pStop) return [pStop.coords.lat, pStop.coords.lng];
   }
 
-  // 4. Distance covered calculation (identical to RouteTimeline / TrainCard progress)
+  // 4. Distance covered calculation (fallback layer)
   const coveredDist = getDistanceCovered(train);
   if (coveredDist != null && coveredDist >= 0) {
     let prevStop = null;
@@ -187,7 +211,8 @@ function resolveTrainPosition(train, stops) {
       }
     }
     if (prevStop && nextStop && nextStop.seq > prevStop.seq) {
-      const frac = Math.max(0, Math.min(1, (seq - prevStop.seq) / (nextStop.seq - prevStop.seq)));
+      const seqFrac = (seq - prevStop.seq) / (nextStop.seq - prevStop.seq);
+      const frac = Math.max(0, Math.min(1, progress != null ? progress : seqFrac));
       return [
         prevStop.coords.lat + (nextStop.coords.lat - prevStop.coords.lat) * frac,
         prevStop.coords.lng + (nextStop.coords.lng - prevStop.coords.lng) * frac,
@@ -196,7 +221,15 @@ function resolveTrainPosition(train, stops) {
     if (prevStop) return [prevStop.coords.lat, prevStop.coords.lng];
   }
 
-  // 6. Fallback to origin coords if running
+  // 6. Current station exact coordinate match
+  const curCode = String(live.currentStationCode || location.currentStationCode || '').toUpperCase();
+  if (curCode) {
+    const cur = stops.find((s) => stationCode(s).toUpperCase() === curCode);
+    const c = cur ? resolveStopCoords(cur) : getStationCoords(curCode);
+    if (c) return [c.lat, c.lng];
+  }
+
+  // 7. Fallback to origin coords if running
   const firstCoords = resolveStopCoords(stops[0]);
   return firstCoords ? [firstCoords.lat, firstCoords.lng] : null;
 }
@@ -301,8 +334,8 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
   // ── 5. Bearing towards next station ─────────────────────────────────────
   const bearing = useMemo(() => {
     const loc = normalizeLive(train?.location || {});
-    const prevCode = String(live.previousHaltCode || loc.previousHaltCode || '').toUpperCase();
-    const nextCode = String(live.nextHaltCode || loc.nextHaltCode || '').toUpperCase();
+    const prevCode = String(live.previousHalt?.stationCode || live.previousHaltCode || loc.previousHaltCode || '').toUpperCase();
+    const nextCode = String(live.nextHalt?.stationCode || live.nextHaltCode || loc.nextHaltCode || '').toUpperCase();
     if (prevCode && nextCode && prevCode !== nextCode) {
       const p1 = resolveStopCoords(stops.find(s => stationCode(s).toUpperCase() === prevCode)) || getStationCoords(prevCode);
       const p2 = resolveStopCoords(stops.find(s => stationCode(s).toUpperCase() === nextCode)) || getStationCoords(nextCode);
@@ -321,14 +354,14 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
       }
     }
     return 0;
-  }, [live.previousHaltCode, live.nextHaltCode, train?.location, train, stops]);
+  }, [live.previousHalt?.stationCode, live.previousHaltCode, live.nextHalt?.stationCode, live.nextHaltCode, train, stops]);
 
   // ── 6. Zoom window: prev halt + train + next halt ────────────────────────
   const liveWindow = useMemo(() => {
     if (!isRunning || !animatedPosition || !window.google?.maps?.LatLngBounds) return null;
     const loc      = normalizeLive(train?.location || {});
-    const prevCode = String(live.previousHaltCode || loc.previousHaltCode || '').toUpperCase();
-    const nextCode = String(live.nextHaltCode     || loc.nextHaltCode     || '').toUpperCase();
+    const prevCode = String(live.previousHalt?.stationCode || live.previousHaltCode || loc.previousHaltCode || '').toUpperCase();
+    const nextCode = String(live.nextHalt?.stationCode     || live.nextHaltCode     || loc.nextHaltCode     || '').toUpperCase();
 
     const bounds = new window.google.maps.LatLngBounds();
     bounds.extend({ lat: animatedPosition[0], lng: animatedPosition[1] });
@@ -342,7 +375,7 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
     addCode(prevCode);
     addCode(nextCode);
     return bounds.isEmpty() ? null : bounds;
-  }, [isRunning, animatedPosition, live.previousHaltCode, live.nextHaltCode, stops, train]);
+  }, [isRunning, animatedPosition, live.previousHalt?.stationCode, live.previousHaltCode, live.nextHalt?.stationCode, live.nextHaltCode, stops, train]);
 
   // ── Effect A: Init Google Maps ────────────────────────────────────────────
   useEffect(() => {
@@ -424,7 +457,7 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
     markersRef.current = [];
 
     const endpoints = stops.length > 0 ? [stops[0], stops[stops.length - 1]] : [];
-    endpoints.forEach((stop, i) => {
+    endpoints.forEach((stop) => {
       const coords = resolveStopCoords(stop);
       if (!coords) return;
 

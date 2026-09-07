@@ -47,14 +47,22 @@ export default function FindTrain() {
 
   useEffect(() => {
     if (!results.length) return;
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
+    const pollCards = () => {
+      if (document.visibilityState === 'visible' && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
         results.slice(0, 6).forEach((train) => {
           dispatch(pollTrainLive({ trainNumber: train.number, journeyDate }));
         });
       }
-    }, 30000);
-    return () => clearInterval(timer);
+    };
+
+    const timer = setInterval(pollCards, 60000);
+    const handleOnline = () => pollCards();
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('online', handleOnline);
+    };
   }, [dispatch, results, journeyDate]);
 
   const visible = useMemo(() => results.filter((train) => filter === 'All' || String(train.type || '').toLowerCase().includes(filter.toLowerCase())), [results, filter]);

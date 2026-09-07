@@ -65,28 +65,48 @@ export function setCachedSearch(query, results) {
 // Static Train Data: details + route/timetable (24h)
 // ─────────────────────────────────────────────────────────
 export function getCachedStatic(trainNumber) {
+  if (!trainNumber) return null;
   return read(makeKey('static', String(trainNumber)), TTL.STATIC);
 }
 export function setCachedStatic(trainNumber, data) {
+  if (!trainNumber || !data) return;
   // Only persist details & route – never live payload inside static
-  const { live, eta, mlEta, stationEtas, liveLastUpdated, ...rest } = data;
+  const rest = { ...data };
+  delete rest.live;
+  delete rest.eta;
+  delete rest.mlEta;
+  delete rest.stationEtas;
+  delete rest.liveLastUpdated;
+  delete rest.location;
   const hasDetails = rest.details && Object.keys(rest.details).length > 0;
-  const hasRoute = Array.isArray(rest.route) && rest.route.length > 0;
-  if (hasDetails || hasRoute) {
+  const hasRoute = (Array.isArray(rest.route) && rest.route.length > 0) || (rest.route && typeof rest.route === 'object');
+  if (hasDetails || hasRoute || rest.resolvedRouteCoords) {
     write(makeKey('static', String(trainNumber)), rest);
   }
 }
 
 // ─────────────────────────────────────────────────────────
 // Live Data: live status, ETA, location (2min, date-scoped)
-// Scoped to today's date so yesterday's status is never used
+// Scoped to specific journeyDate (e.g. railai:live:20423:2026-09-07)
 // ─────────────────────────────────────────────────────────
-export function getCachedLive(trainNumber) {
-  const date = todayISO();
+export function getCachedLive(trainNumber, journeyDate) {
+  if (!trainNumber) return null;
+  const date = journeyDate || todayISO();
   return read(makeKey('live', String(trainNumber), date), TTL.LIVE);
 }
-export function setCachedLive(trainNumber, data) {
-  const date = todayISO();
+
+export function setCachedLive(trainNumber, journeyDateOrData, maybeData) {
+  if (!trainNumber) return;
+  let date;
+  let data;
+  if (typeof journeyDateOrData === 'string' && journeyDateOrData && maybeData !== undefined) {
+    date = journeyDateOrData;
+    data = maybeData;
+  } else {
+    data = journeyDateOrData;
+    date = data?.journeyDate || data?.live?.journeyDate || todayISO();
+  }
+  if (!data) return;
   write(makeKey('live', String(trainNumber), date), data);
 }
 
@@ -94,27 +114,40 @@ export function setCachedLive(trainNumber, data) {
  * Check if live cache is fresh enough to use immediately (< 2 min old)
  * Returns true if fresh, false if stale/absent
  */
-export function isLiveFresh(trainNumber) {
-  return getCachedLive(trainNumber) !== null;
+export function isLiveFresh(trainNumber, journeyDate) {
+  return getCachedLive(trainNumber, journeyDate) !== null;
 }
 
 /**
  * Hydrate static + live separately for a train bundle.
  * Returns merged bundle or null fields where not cached.
  */
-export function getCachedBundle(trainNumber) {
+export function getCachedBundle(trainNumber, journeyDate) {
   const staticData = getCachedStatic(trainNumber);
-  const liveData   = getCachedLive(trainNumber);
+  const liveData   = getCachedLive(trainNumber, journeyDate);
   if (!staticData && !liveData) return null;
   return { ...(staticData || {}), ...(liveData || {}) };
 }
 
 /**
- * Bust all live cache entries for a train (e.g., after manual refresh).
+ * Bust live cache entries for a train (e.g., after manual refresh).
  */
-export function bustLiveCache(trainNumber) {
-  const date = todayISO();
-  remove(makeKey('live', String(trainNumber), date));
+export function bustLiveCache(trainNumber, journeyDate) {
+  if (!trainNumber) return;
+  if (journeyDate) {
+    remove(makeKey('live', String(trainNumber), journeyDate));
+  } else {
+    remove(makeKey('live', String(trainNumber), todayISO()));
+    try {
+      const prefix = makeKey('live', String(trainNumber)) + ':';
+      const toRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(prefix)) toRemove.push(k);
+      }
+      toRemove.forEach((k) => localStorage.removeItem(k));
+    } catch { /* noop */ }
+  }
 }
 
 /**
@@ -139,3 +172,4 @@ export function pruneExpiredCache() {
     toRemove.forEach((k) => localStorage.removeItem(k));
   } catch { /* noop */ }
 }
+
