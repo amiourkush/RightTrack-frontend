@@ -261,7 +261,7 @@ function makeStationIcon(isEndpoint) {
   return {
     path: window.google.maps.SymbolPath.CIRCLE,
     scale: isEndpoint ? 10 : 7,
-    fillColor: isEndpoint ? '#0d716a' : '#2a9d8f',
+    fillColor: isEndpoint ? '#dc2626' : '#ef4444',
     fillOpacity: 1,
     strokeColor: '#ffffff',
     strokeWeight: isEndpoint ? 3 : 2,
@@ -305,11 +305,18 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
   const live  = useMemo(() => normalizeLive(train?.live     || {}), [train?.live]);
   const stops = useMemo(() => getMergedRouteStops(train),           [train]);
 
-  // ── 1. Main-halt markers (only main stations) ────────────────────────────
-  const mainHalts = useMemo(
-    () => stops.filter((s, i, arr) => isMainHalt(s, i, arr)),
-    [stops]
-  );
+  // ── 1. Main-halt markers (only main stations, deduplicated) ─────────────
+  const mainHalts = useMemo(() => {
+    const raw = stops.filter((s, i, arr) => isMainHalt(s, i, arr));
+    const seen = new Set();
+    return raw.filter((s) => {
+      const code = stationCode(s)?.toUpperCase();
+      if (!code) return true;
+      if (seen.has(code)) return false;
+      seen.add(code);
+      return true;
+    });
+  }, [stops]);
 
   // ── 2. Full route coordinates (all stops for polyline) ──────────────────
   const routeCoords = useMemo(() => {
@@ -448,7 +455,7 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
     }
   }, [routeCoords, mapStatus, trainNumber]);
 
-  // ── Effect C: Station markers — ENDPOINTS ONLY ───────────────────────────
+  // ── Effect C: Station markers — MAIN HALTS ONLY ───────────────────────────
   useEffect(() => {
     if (mapStatus !== 'ready') return;
 
@@ -456,23 +463,24 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
     markersRef.current.forEach(m => m.setMap(null));
     markersRef.current = [];
 
-    const endpoints = stops.length > 0 ? [stops[0], stops[stops.length - 1]] : [];
-    endpoints.forEach((stop) => {
+    mainHalts.forEach((stop, index) => {
       const coords = resolveStopCoords(stop);
       if (!coords) return;
+
+      const isEndpoint = index === 0 || index === mainHalts.length - 1;
 
       const marker = new window.google.maps.Marker({
         map:      mapRef.current,
         position: toLatLng(coords),
         title:    stationName(stop),
-        icon:     makeStationIcon(true),
+        icon:     makeStationIcon(isEndpoint),
         label: {
           text:      stationCode(stop),
           color:     '#ffffff',
-          fontSize:  '9px',
+          fontSize:  isEndpoint ? '9px' : '8px',
           fontWeight: 'bold',
         },
-        zIndex: 30,
+        zIndex: isEndpoint ? 35 : 30,
       });
 
       const etaPred = getStationEtaPredictions(train, stop);
@@ -483,7 +491,7 @@ export default function TrainMap({ train, fullscreen, onToggleFullscreen, onRefr
       marker.addListener('mouseout', () => infoRef.current?.close());
       markersRef.current.push(marker);
     });
-  }, [stops, mapStatus, train, timeFormat]);
+  }, [mainHalts, mapStatus, train, timeFormat]);
 
   // ── Effect D: Animated directional train marker ───────────────────────────
   useEffect(() => {
