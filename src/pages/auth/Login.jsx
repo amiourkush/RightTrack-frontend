@@ -28,5 +28,47 @@ export default function Login() {
   const google = useCallback(async (idToken) => { setGoogleLoading(true); const result = await dispatch(signInWithGoogle(idToken)); setGoogleLoading(false); if (signInWithGoogle.fulfilled.match(result)) navigate(next, { replace: true }); }, [dispatch, navigate]);
   const unverified = looksLikeUnverifiedEmail(error?.message || '');
 
-  return <AuthShell title="Welcome back" subtitle="Sign in to continue your journey"><form className="auth-form" onSubmit={handleSubmit(submit)}>{error?.message && <div className="form-alert error"><span>{error.message}</span>{unverified && <Link to={`/verify-email?email=${encodeURIComponent(email || '')}`}>Verify email</Link>}</div>}<label className="field-label">Email address</label><div className={`field ${errors.email ? 'field-error' : ''}`}><Mail size={16} /><input type="email" placeholder="you@example.com" {...register('email', { required: 'Email is required' })} /></div>{errors.email && <span className="field-message">{errors.email.message}</span>}<label className="field-label">Password</label><div className={`field ${errors.password ? 'field-error' : ''}`}><LockKeyhole size={16} /><input type={showPassword ? 'text' : 'password'} placeholder="Password" {...register('password', { required: 'Password is required' })} /><button type="button" className="field-action" onClick={() => setShowPassword((value) => !value)}>{showPassword ? <EyeOff size={15} /> : <Eye size={15} />}</button></div>{errors.password && <span className="field-message">{errors.password.message}</span>}<div className="form-row-between"><label className="checkbox-label"><input type="checkbox" defaultChecked /> Keep me signed in</label><button type="button" className="text-button" disabled>Forgot password?</button></div><button className="primary-button" disabled={loading}>{loading ? <><Spinner small /> Signing in…</> : 'Sign in'}</button></form><AuthDivider /><GoogleSignIn onCredential={google} loading={googleLoading} /><p className="auth-switch">Don’t have an account? <Link to="/register">Create account</Link></p></AuthShell>;
+  return (
+    <AuthShell title="Welcome back" subtitle="Sign in to continue your journey">
+      <form className="auth-form" onSubmit={handleSubmit(submit)}>
+        {error?.message && (
+          <div className="form-alert error">
+            <span>{error.message}</span>
+            {unverified && <Link to={`/verify-email?email=${encodeURIComponent(email || '')}`}>Verify email</Link>}
+          </div>
+        )}
+        <label className="field-label">Email address</label>
+        <div className={`field ${errors.email ? 'field-error' : ''}`}>
+          <Mail size={16} />
+          <input type="email" placeholder="you@example.com" {...register('email', { required: 'Email is required' })} />
+        </div>
+        {errors.email && <span className="field-message">{errors.email.message}</span>}
+
+        <label className="field-label">Password</label>
+        <div className={`field ${errors.password ? 'field-error' : ''}`}>
+          <LockKeyhole size={16} />
+          <input type={showPassword ? 'text' : 'password'} placeholder="Password" {...register('password', { required: 'Password is required' })} />
+          <button type="button" className="field-action" onClick={() => setShowPassword((value) => !value)}>
+            {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+        </div>
+        {errors.password && <span className="field-message">{errors.password.message}</span>}
+
+        <div className="form-row-between">
+          <label className="checkbox-label">
+            <input type="checkbox" defaultChecked /> Keep me signed in
+          </label>
+          <button type="button" className="text-button" disabled>Forgot password?</button>
+        </div>
+
+        <button className="primary-button" disabled={loading}>
+          {loading ? <><Spinner small /> Signing in…</> : 'Sign in'}
+        </button>
+      </form>
+
+      <p className="auth-switch">
+        Don’t have an account? <Link to="/register">Create account</Link>
+      </p>
+    </AuthShell>
+  );
 }
